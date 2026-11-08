@@ -142,6 +142,7 @@ function detailHTML(s) {
     ${s.to ? kv(ferry ? "To" : s.dir === "arr" ? "Heading to" : "Next port", esc(s.to), "wide") : ""}
     ${s.agent ? kv("Agent", esc(s.agent), "wide") : ""}
     ${s.pax ? kv("Passengers", num(s.pax)) : ""}
+    ${ferry ? "" : `<div class="s-actions"><button class="track-btn" type="button" data-track="${esc(s.id)}">Track on map</button></div>`}
     <p class="src">${ferry ? "Source: Singapore Cruise Centre ferry board" : "Source: MPA port declarations (updated about hourly)"}</p>
   </dl>`;
 }
@@ -165,6 +166,7 @@ async function loadParticulars(s) {
 // ================================================================ state + board
 
 const state = {
+  view: "board",
   dir: store.get("dir", "arr"),
   cat: store.get("cat", "all"),
   q: "",
@@ -293,12 +295,29 @@ function toggleRow(id) {
 
 function setDir(dir) {
   state.dir = dir; store.set("dir", dir); state.open.clear(); state.showEarlier = false;
-  for (const t of $$(".tab")) t.setAttribute("aria-selected", String(t.dataset.dir === dir));
+  showView("board");
   renderBoard();
 }
 
+/** "board" (Arrivals/Departures) or "tracker". Keeps #tracker in the URL so it can be linked. */
+function showView(view) {
+  state.view = view;
+  $("#view-board").hidden = view !== "board";
+  $("#view-tracker").hidden = view !== "tracker";
+  document.body.classList.toggle("tracker-on", view === "tracker");
+  const sel = view === "tracker" ? "tracker" : state.dir;
+  for (const t of $$(".tab")) t.setAttribute("aria-selected", String(t.dataset.tab === sel));
+  $("#view-board").setAttribute("aria-labelledby", `tab-${state.dir}`);
+  const hash = view === "tracker" ? "#tracker" : "";
+  if (location.hash !== hash) history.replaceState(null, "", location.pathname + location.search + hash);
+  if (view === "tracker") openTracker();
+}
+
 function bind() {
-  $$(".tab").forEach((t) => t.addEventListener("click", () => setDir(t.dataset.dir)));
+  $$(".tab").forEach((t) => t.addEventListener("click", () => {
+    if (t.dataset.tab === "tracker") showView("tracker");
+    else setDir(t.dataset.tab);
+  }));
   $$("[data-cat]").forEach((b) => b.addEventListener("click", () => {
     state.cat = b.dataset.cat; store.set("cat", state.cat); renderBoard();
   }));
@@ -310,6 +329,8 @@ function bind() {
   $("#board").addEventListener("click", (e) => {
     const act = e.target.closest("[data-act]");
     if (act) { state.showEarlier = act.dataset.act === "earlier"; renderBoard(); return; }
+    const track = e.target.closest("[data-track]");
+    if (track) { const s = findShip(track.dataset.track); if (s) trackShip(s); return; }
     const row = e.target.closest(".ship");
     if (row && e.target.closest(".s-row")) toggleRow(row.dataset.id);
   });
@@ -324,7 +345,300 @@ function bind() {
     if (again) again.querySelector(".s-row").focus();
   });
   $("#refresh").addEventListener("click", () => refreshNow({ manual: true }));
-  setDir(state.dir);
+  bindTracker();
+  if (location.hash === "#tracker") showView("tracker");
+  else setDir(state.dir);
+}
+
+// ================================================================ tracker
+//
+// ~1,200 ships around Singapore from MPA's positions snapshot (via /api/positions).
+// Drawn on one canvas over the Leaflet map instead of 1,200 DOM markers, so panning
+// stays smooth on a phone. Taps are matched to the nearest drawn ship.
+
+const STRAIT = [1.22, 103.84]; // Singapore Strait, off HarbourFront / Marina South
+const STRAIT_ZOOM = 11;
+const TRACK_ZOOM = 14;
+const HIT_PX = 18; // tap tolerance around a ship
+
+const tracker = {
+  map: null,
+  canvas: null,
+  ctx: null,
+  data: null,
+  cat: store.get("mcat", "all"),
+  selected: null, // ship key
+  drawn: [], // [{ s, x, y }] from the last draw, for hit-testing
+  fetchedAt: 0,
+  error: null,
+  loading: null, // promise while a fetch is running
+  colors: null,
+};
+
+const shipKey = (s) => (s.imo ? `imo:${s.imo}` : `n:${s.n}`);
+
+function catColors() {
+  if (tracker.colors) return tracker.colors;
+  const css = getComputedStyle(document.documentElement);
+  const v = (n, d) => (css.getPropertyValue(n) || "").trim() || d;
+  tracker.colors = { ferry: v("--ferry", "#4fd8c8"), cruise: v("--cruise", "#c4a2ff"), cargo: v("--cargo", "#6cb6ff"), accent: v("--accent", "#ffd23f") };
+  return tracker.colors;
+}
+
+function bindTracker() {
+  $$("[data-mcat]").forEach((b) => b.addEventListener("click", () => {
+    tracker.cat = b.dataset.mcat; store.set("mcat", tracker.cat);
+    const sel = selectedShip();
+    if (sel && tracker.cat !== "all" && sel.c !== tracker.cat) select(null);
+    renderMapChips(); draw();
+  }));
+  $(".card-close").addEventListener("click", () => select(null));
+  renderMapChips();
+}
+
+function renderMapChips() {
+  const ships = (tracker.data && tracker.data.ships) || [];
+  for (const b of $$("[data-mcat]")) {
+    const c = b.dataset.mcat;
+    const label = { all: "All", ferry: "Ferries", cruise: "Cruise", cargo: "Cargo/Other" }[c];
+    const n = c === "all" ? ships.length : ships.filter((s) => s.c === c).length;
+    b.innerHTML = `${label}${tracker.data ? `<span class="chip-count">${n}</span>` : ""}`;
+    b.setAttribute("aria-pressed", String(c === tracker.cat));
+  }
+}
+
+function initMap() {
+  if (tracker.map || !window.L) return;
+  const map = L.map("map", { center: STRAIT, zoom: STRAIT_ZOOM, zoomControl: false, attributionControl: true });
+  L.control.zoom({ position: "bottomright" }).addTo(map);
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 18,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · Positions: MPA via OCEANS-X',
+  }).addTo(map);
+  const canvas = document.createElement("canvas");
+  canvas.className = "ship-canvas";
+  map.getContainer().appendChild(canvas);
+  tracker.canvas = canvas;
+  tracker.ctx = canvas.getContext("2d");
+  // Leaflet animates zoom with CSS transforms the canvas can't follow: hide it until the zoom ends.
+  map.on("zoomstart", () => { canvas.style.visibility = "hidden"; });
+  map.on("zoomend", () => { canvas.style.visibility = ""; draw(); });
+  map.on("move resize", requestDraw);
+  map.on("click", (e) => {
+    const hit = nearestShip(e.containerPoint);
+    select(hit ? shipKey(hit) : null);
+  });
+  tracker.map = map;
+}
+
+function openTracker() {
+  if (!window.L) {
+    // Leaflet is loaded with `defer` before this script, so this is only a CDN failure.
+    $("#map-note").innerHTML = `<span class="stale">Map library didn't load. Check your connection.</span>`;
+    return;
+  }
+  initMap();
+  // The map container was hidden until now: let Leaflet measure it.
+  setTimeout(() => { tracker.map.invalidateSize(); draw(); }, 0);
+  if (!tracker.data || Date.now() - tracker.fetchedAt > AUTO_REFRESH_MS) loadPositions();
+}
+
+async function loadPositions() {
+  if (tracker.loading) return tracker.loading;
+  tracker.loading = (async () => {
+    try {
+      tracker.data = await getJSON("/api/positions");
+      tracker.error = null;
+      tracker.fetchedAt = Date.now();
+    } catch (e) {
+      tracker.error = e.message;
+    } finally {
+      tracker.loading = null;
+    }
+    renderMapNote();
+    renderMapChips();
+    draw();
+    renderCard();
+  })();
+  return tracker.loading;
+}
+
+function renderMapNote() {
+  const el = $("#map-note");
+  const d = tracker.data;
+  if (!d) { el.innerHTML = tracker.error ? `<span class="stale">Couldn't load positions: ${esc(tracker.error)}</span>` : "Loading positions…"; return; }
+  if (!d.updatedAt) { el.innerHTML = `<span class="stale">No positions yet</span>`; return; }
+  const age = Date.now() - d.updatedAt;
+  const old = age > OLD_DATA_MS;
+  const shown = visibleShips().length;
+  const tail = tracker.error || d.stale || old
+    ? ` · <span class="stale" title="${esc([tracker.error, d.error].filter(Boolean).join("\n"))}">${old ? `${Math.round(age / 60e3)} min old, may be stale` : "may be stale"}</span>`
+    : "";
+  el.innerHTML = `Updated ${esc(hm(d.updatedAt))} SGT · ${num(shown) || 0} ships${tail}`;
+}
+
+function visibleShips() {
+  const ships = (tracker.data && tracker.data.ships) || [];
+  return tracker.cat === "all" ? ships : ships.filter((s) => s.c === tracker.cat);
+}
+
+function selectedShip() {
+  if (!tracker.selected || !tracker.data) return null;
+  return tracker.data.ships.find((s) => shipKey(s) === tracker.selected) || null;
+}
+
+/** Marker size from ship length (m), a little bigger when zoomed in. */
+function shipRadius(s, zoom) {
+  const l = s.l || 0;
+  const base = l >= 250 ? 8 : l >= 150 ? 7 : l >= 60 ? 5.5 : 4.5;
+  return base * (zoom >= 14 ? 1.4 : zoom >= 12 ? 1.15 : zoom <= 9 ? 0.75 : 1);
+}
+
+function drawShip(ctx, x, y, r, heading, fill, ring) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.beginPath();
+  if (heading === undefined || heading === null) {
+    ctx.arc(0, 0, r * 0.62, 0, Math.PI * 2);
+  } else {
+    // A pointed hull, bow up, then rotated to the heading (degrees clockwise from north).
+    ctx.rotate((heading * Math.PI) / 180);
+    ctx.moveTo(0, -r * 1.5);
+    ctx.lineTo(r * 0.72, r * 0.25);
+    ctx.lineTo(r * 0.55, r);
+    ctx.lineTo(-r * 0.55, r);
+    ctx.lineTo(-r * 0.72, r * 0.25);
+    ctx.closePath();
+  }
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = "rgba(11,12,14,0.85)";
+  ctx.stroke();
+  ctx.restore();
+  if (ring) {
+    ctx.beginPath();
+    ctx.arc(x, y, r * 1.9, 0, Math.PI * 2);
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = ring;
+    ctx.stroke();
+  }
+}
+
+function draw() {
+  const map = tracker.map;
+  if (!map || !tracker.canvas || state.view !== "tracker") return;
+  const { x: w, y: h } = map.getSize();
+  const dpr = Math.min(window.devicePixelRatio || 1, 3);
+  const c = tracker.canvas;
+  if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) {
+    c.width = Math.round(w * dpr); c.height = Math.round(h * dpr);
+    c.style.width = `${w}px`; c.style.height = `${h}px`;
+  }
+  const ctx = tracker.ctx;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const colors = catColors();
+  const zoom = map.getZoom();
+  const bounds = map.getBounds().pad(0.05);
+  const drawn = [];
+  // Busy categories first, so the rarer cruise ships and ferries sit on top.
+  const order = { cargo: 0, ferry: 1, cruise: 2 };
+  const ships = visibleShips().slice().sort((a, b) => (order[a.c] || 0) - (order[b.c] || 0));
+  let sel = null;
+  for (const s of ships) {
+    if (!bounds.contains([s.la, s.lo])) continue;
+    const p = map.latLngToContainerPoint([s.la, s.lo]);
+    const r = shipRadius(s, zoom);
+    if (shipKey(s) === tracker.selected) { sel = { s, p, r }; continue; }
+    drawShip(ctx, p.x, p.y, r, s.h, colors[s.c] || colors.cargo, null);
+    drawn.push({ s, x: p.x, y: p.y });
+  }
+  if (sel) {
+    drawShip(ctx, sel.p.x, sel.p.y, sel.r * 1.25, sel.s.h, colors[sel.s.c] || colors.cargo, colors.accent);
+    drawn.push({ s: sel.s, x: sel.p.x, y: sel.p.y });
+  }
+  tracker.drawn = drawn;
+}
+
+let drawFrame = 0;
+/** Coalesce redraws while panning: at most one per animation frame. */
+function requestDraw() {
+  if (drawFrame) return;
+  drawFrame = requestAnimationFrame(() => { drawFrame = 0; draw(); });
+}
+
+function nearestShip(pt) {
+  let best = null;
+  let bestD = HIT_PX * HIT_PX;
+  // Later entries are drawn on top, so prefer them on a tie.
+  for (let i = tracker.drawn.length - 1; i >= 0; i--) {
+    const d = tracker.drawn[i];
+    const dd = (d.x - pt.x) ** 2 + (d.y - pt.y) ** 2;
+    if (dd < bestD) { bestD = dd; best = d.s; }
+  }
+  return best;
+}
+
+function select(key) {
+  tracker.selected = key;
+  draw();
+  renderCard();
+}
+
+function renderCard() {
+  const card = $("#card");
+  const s = selectedShip();
+  if (!s) {
+    card.classList.remove("show");
+    card.setAttribute("aria-hidden", "true");
+    $("#view-tracker").classList.remove("card-open");
+    return;
+  }
+  const types = (tracker.data && tracker.data.types) || {};
+  const type = (s.tc && types[s.tc]) || s.tc || CAT_LABEL[s.c];
+  const flag = s.fl ? `${esc(countryName(s.fl) || s.fl)}${countryName(s.fl) ? ` <small>${esc(s.fl)}</small>` : ""}` : "—";
+  const speed = s.s === undefined ? "—" : s.s < 0.5 ? "Stationary" : `${s.s.toFixed(1)} kn`;
+  $("#card-body").innerHTML = `
+    <p class="c-name">${esc(s.n)}</p>
+    <p class="c-type cat-${esc(s.c)}">${esc(type)}${type !== CAT_LABEL[s.c] ? ` <span class="s-sub">· ${esc(CAT_LABEL[s.c])}</span>` : ""}</p>
+    <dl class="c-stats">
+      ${kv("Flag", flag)}
+      ${kv("Speed", esc(speed))}
+      ${kv("Length", s.l ? `${num(s.l)} m` : "—")}
+      ${kv("IMO", esc(s.imo) || "—")}
+    </dl>`;
+  card.classList.add("show");
+  card.setAttribute("aria-hidden", "false");
+  $("#view-tracker").classList.add("card-open");
+}
+
+let toastTimer;
+function toast(text) {
+  const el = $("#toast");
+  el.textContent = text;
+  el.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("show"), 3200);
+}
+
+/** From an expanded board row: open the Tracker centred on that ship, if it's in the positions. */
+async function trackShip(row) {
+  showView("tracker");
+  if (!tracker.map) return;
+  if (!tracker.data || Date.now() - tracker.fetchedAt > AUTO_REFRESH_MS) await loadPositions();
+  const ships = (tracker.data && tracker.data.ships) || [];
+  const name = (row.name || "").toUpperCase();
+  const s = (row.imo && ships.find((x) => x.imo === row.imo)) || ships.find((x) => (x.n || "").toUpperCase() === name);
+  if (!s) {
+    toast(`${row.name} isn't in the live positions right now.`);
+    return;
+  }
+  if (tracker.cat !== "all" && s.c !== tracker.cat) {
+    tracker.cat = "all"; store.set("mcat", "all"); renderMapChips(); renderMapNote();
+  }
+  tracker.map.setView([s.la, s.lo], Math.max(tracker.map.getZoom(), TRACK_ZOOM));
+  select(shipKey(s));
 }
 
 // ================================================================ refresh
@@ -350,12 +664,15 @@ function refreshNow({ manual = false } = {}) {
   return refreshing;
 }
 
+// Auto-refresh whatever is on screen, only while the page is visible.
 setInterval(() => {
-  if (document.visibilityState === "visible") refreshNow();
-  else renderUpdated();
+  if (document.visibilityState !== "visible") { renderUpdated(); return; }
+  if (state.view === "tracker") loadPositions(); else refreshNow();
 }, AUTO_REFRESH_MS);
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && Date.now() - lastRefresh > AUTO_REFRESH_MS) refreshNow();
+  if (document.visibilityState !== "visible") return;
+  if (state.view === "tracker") { if (Date.now() - tracker.fetchedAt > AUTO_REFRESH_MS) loadPositions(); }
+  else if (Date.now() - lastRefresh > AUTO_REFRESH_MS) refreshNow();
 });
 
 bind();
