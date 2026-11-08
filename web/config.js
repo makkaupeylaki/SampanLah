@@ -4,4 +4,4 @@
 //   window.HARBOURLAH_API = "https://harbourlah.<your-subdomain>.workers.dev";
 // Leave it empty to call the same origin (e.g. if the Worker is routed at
 // <your-domain>/api/*). On localhost it defaults to `wrangler dev` (port 8787).
-window.HARBOURLAH_API = "";
+window.HARBOURLAH_API = "https://harbourlah.9nhi5b.workers.dev";
