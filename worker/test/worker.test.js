@@ -4,7 +4,8 @@ import { readFileSync } from "node:fs";
 import worker, { refreshBoard, refreshReference, clearMemo, resetRefGuard } from "../src/index.js";
 import { buildBoard, classify } from "../src/board.js";
 import { parseFerryPage, slotsFor, operatorName } from "../src/scc.js";
-import { normaliseMovements, normaliseSnapshot, vesselKey } from "../src/mpa.js";
+import { normaliseMovements, normaliseSnapshot, normalisePositions, vesselKey } from "../src/mpa.js";
+import { refreshPositions } from "../src/index.js";
 import { parseTime, sgtStamp } from "../src/time.js";
 import { makeKV, installCaches, makeCtx } from "./harness.js";
 
@@ -43,8 +44,10 @@ function mockUpstream({ fail = new Set(), scc = SCC_HTML } = {}) {
       dep: [{ vesselParticulars: vp("GOLDEN STAR 1", "8952857", "5IM444", "TZ"), departedTime: sgt("16:30") }],
       decl: [{ vesselParticulars: vp("KOTA GABUNG", "9616852", "VRQR3", "HK"), nextPort: "PORT KLANG", agent: "PIL PTE LTD", reportedDepartureTime: sgt("21:30"), pax: "0" }],
       snapshot: [
-        { vesselParticulars: { ...vp("MSC DIEGO", "9202649", "3FZP8"), vesselType: "CS", vesselLength: 294, vesselBreadth: 32, grossTonnage: 66000, yearBuilt: "1999", mmsiNumber: "352000000" } },
-        { vesselParticulars: { ...vp("SPECTRUM OF THE SEAS", "9778856", "C6DF5", "BS"), vesselType: "PA", vesselLength: 347, grossTonnage: 169379 } },
+        { vesselParticulars: { ...vp("MSC DIEGO", "9202649", "3FZP8"), vesselType: "CS", vesselLength: 294, vesselBreadth: 32, grossTonnage: 66000, yearBuilt: "1999", mmsiNumber: "352000000" },
+          latitude: 0.0221, longitude: 1.8113, latitudeDegrees: 1.26623, longitudeDegrees: 103.78123, speed: 0.1, course: 127.9, heading: 0, timeStamp: "2026-11-08 17:58:00" },
+        { vesselParticulars: { ...vp("SPECTRUM OF THE SEAS", "9778856", "C6DF5", "BS"), vesselType: "PA", vesselLength: 347, grossTonnage: 169379 },
+          latitudeDegrees: 1.2101, longitudeDegrees: 103.9001, speed: 14.27, course: 280, heading: 281 },
       ],
       types: [{ vesselTypeCode: "CS", vesselTypeDescription: "CONTAINER SHIP" }, { vesselTypeCode: "PA", vesselTypeDescription: "PASSENGER" }],
       locs: [{ locationCode: "PPBG", locationDescription: "PASIR PANJANG TERMINAL" }, { locationCode: "PMBCC", locationDescription: "MARINA BAY CRUISE CENTRE" }],
@@ -312,6 +315,74 @@ test("cron tick fills missing reference data through the same guard", async () =
   const ctx = makeCtx();
   await worker.scheduled({ cron: "*/10 * * * *" }, e, ctx);
   await ctx.drain();
-  assert.equal(refCalls(calls), 3);
+  assert.equal(refCalls(calls), 4, "types + locations + snapshot, then the positions snapshot");
   assert.ok(await e.BOARD_KV.get("ref"));
+});
+
+// ---------------------------------------------------------------- positions (Tracker)
+
+test("positions are slimmed: degrees (radians fallback), heading fallback, no extra fields", () => {
+  const ships = normalisePositions([
+    { vesselParticulars: { ...vp("A", "9214898", "OVYQ2", "DK"), vesselType: "CS", vesselLength: 347, grossTonnage: 91560, mmsiNumber: "1" },
+      latitude: 0.0241476315047, longitude: 1.80084330648, speed: 5.17939, course: 127.988, heading: 0 },
+    { vesselParticulars: vp("B", "0", "", "SG"), latitudeDegrees: 1.3, longitudeDegrees: 103.7, speed: 0, course: 0, heading: 511 },
+    { vesselParticulars: vp("NOPOS", "9999999") },
+  ]);
+  assert.equal(ships.length, 2);
+  const [a, b] = ships;
+  assert.ok(Math.abs(a.la - 1.38356) < 1e-4 && Math.abs(a.lo - 103.18072) < 1e-4, "radians converted");
+  assert.equal(a.h, 128, "heading 0 falls back to course");
+  assert.equal(a.s, 5.2);
+  assert.deepEqual(Object.keys(a).sort(), ["fl", "g", "h", "imo", "l", "la", "lo", "n", "s", "tc"]);
+  assert.equal(b.h, undefined, "511 and a resting 0 course mean unknown");
+  assert.equal(b.imo, undefined);
+});
+
+test("board tick writes the board and positions: 2 KV puts", async () => {
+  clearMemo(); resetRefGuard();
+  const e = env();
+  mockUpstream();
+  await refreshReference(e, NOW, { force: true });
+  const before = e.BOARD_KV.writes;
+  const ctx = makeCtx();
+  await worker.scheduled({ cron: "*/10 * * * *" }, e, ctx);
+  await ctx.drain();
+  assert.equal(e.BOARD_KV.writes - before, 2);
+  const stored = await e.BOARD_KV.get("positions", "json");
+  assert.equal(stored.ships.length, 2);
+  const spectrum = stored.ships.find((x) => x.n === "SPECTRUM OF THE SEAS");
+  assert.equal(spectrum.c, "cruise");
+  assert.equal(stored.types.PA, "Passenger");
+  assert.ok(JSON.stringify(stored).length < 1000);
+});
+
+test("positions failure keeps last ships, writes the error once, and goes stale", async () => {
+  clearMemo();
+  const e = env();
+  mockUpstream();
+  const t0 = Date.now();
+  await refreshPositions(e, t0);
+  mockUpstream({ fail: new Set(["snapshot"]) });
+  const w = e.BOARD_KV.writes;
+  await refreshPositions(e, t0 + 10 * 60e3);
+  await refreshPositions(e, t0 + 20 * 60e3);
+  assert.equal(e.BOARD_KV.writes - w, 1, "error written once, not every tick");
+  const res = await worker.fetch(new Request("https://w.example/api/positions"), e, makeCtx());
+  assert.equal(res.headers.get("Cache-Control"), "no-store");
+  const body = await res.json();
+  assert.equal(body.count, 2, "last good ships still served");
+  assert.equal(body.updatedAt, t0);
+  assert.equal(body.stale, true);
+  assert.match(body.error, /503/);
+});
+
+test("/api/positions seeds KV on a fresh deploy", async () => {
+  clearMemo();
+  const e = env();
+  mockUpstream();
+  const res = await worker.fetch(new Request("https://w.example/api/positions"), e, makeCtx());
+  const body = await res.json();
+  assert.equal(body.count, 2);
+  assert.equal(body.stale, false);
+  assert.ok(await e.BOARD_KV.get("positions"));
 });
