@@ -198,9 +198,48 @@ test("classification", () => {
   assert.equal(classify({ src: "scc" }), "ferry");
   assert.equal(classify({ typeDesc: "PASSENGER", gt: 300, len: 35 }), "ferry");
   assert.equal(classify({ typeDesc: "PASSENGER", gt: 90000 }), "cruise");
-  assert.equal(classify({ typeDesc: "PASSENGER", gt: 0, locDescs: ["MARINA BAY CRUISE CENTRE"] }), "cruise");
+  assert.equal(classify({ typeDesc: "Passenger Vessel", berths: [{ desc: "MARINA BAY CC BTH 1" }] }), "cruise");
   assert.equal(classify({ typeDesc: "BULK CARRIER" }), "cargo");
+  assert.equal(classify({ typeDesc: "Tug Boat", berths: [{ code: "RFT2" }] }), "cargo", "known non-passenger type wins");
   assert.equal(classify({}), "cargo");
+});
+
+test("unknown type: berth codes and real MPA descriptions decide, case-insensitively", () => {
+  for (const code of ["CC01", "CC01E", "CC01W", "CC02", "CM01", "CM02", "cm01"]) {
+    assert.equal(classify({ berths: [{ code }] }), "cruise", code);
+  }
+  for (const code of ["RFT1", "RFT8", "DFT5", "DFT8", "TMFT", "CFT"]) {
+    assert.equal(classify({ berths: [{ code }] }), "ferry", code);
+  }
+  // Descriptions as they come from MPA (upper case) and as shown on the board (title case).
+  for (const desc of ["MARINA BAY CC BTH 1", "Marina Bay Cc Bth 1", "HarbourFront Cruise Centre"]) {
+    assert.equal(classify({ berths: [{ desc }] }), "cruise", desc);
+  }
+  for (const desc of ["TANAH MERAH FERRY TERM", "Regional Ferry Plat 4", "MARINA SOUTH FERRY TML"]) {
+    assert.equal(classify({ berths: [{ desc }] }), "ferry", desc);
+  }
+  for (const desc of ["Brani Terminal Berth 7", "Marina Berth 1", "Vopak Terminal Berth 1", "Western Petroleum A Anchorage"]) {
+    assert.equal(classify({ berths: [{ desc }] }), "cargo", desc);
+  }
+  assert.equal(classify({ berths: [{ code: "RFT9" }, { code: "CC03" }] }), "cargo", "only the listed codes");
+});
+
+test("inbound cruise ship with no particulars yet is Cruise, and its departure too", () => {
+  const now = Date.parse("2026-11-08T10:00:00Z");
+  const ship = { n: "NEW CRUISER", imo: "9999991", cs: "ABCD1", fl: "BS" };
+  const feed = (items) => ({ okAt: now, error: null, items });
+  const snap = { feeds: {
+    dueArr: feed([{ ...ship, t: now + 3600e3, from: "SEAE", to: "CM01" }]),
+    arr: feed([]),
+    dueDep: feed([{ ...ship, t: now + 10 * 3600e3 }]),
+    dep: feed([]),
+  } };
+  const ref = { types: { CS: "CONTAINER SHIP" }, locs: { CM01: "MARINA BAY CC BTH 1" } };
+  const b = buildBoard(snap, ref, { v: {} }, now);
+  assert.equal(b.arr[0].cat, "cruise");
+  assert.equal(b.arr[0].to, "Marina Bay Cc Bth 1");
+  assert.equal(b.dep[0].cat, "cruise");
+  assert.equal(b.dep[0].loc, "CM01");
 });
 
 test("normalisers drop junk and key vessels sensibly", () => {
