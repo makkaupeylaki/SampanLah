@@ -13,6 +13,7 @@
   <meta property="og:site_name" content="harbourlah">
   <meta property="og:title" content="harbourlah">
   <meta property="og:description" content="Ships arriving and departing Singapore: ferries at HarbourFront and Tanah Merah, cruise ships at Marina Bay and HarbourFront, and cargo vessels.">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" crossorigin="anonymous">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -21,13 +22,15 @@
       <span class="brand-name">harbourlah</span>
       <span class="brand-sub">SG · HarbourFront</span>
     </div>
-    <nav class="tabs" role="tablist" aria-label="Direction">
-      <button class="tab" role="tab" id="tab-arr" aria-controls="board" aria-selected="true" data-dir="arr">Arrivals</button>
-      <button class="tab" role="tab" id="tab-dep" aria-controls="board" aria-selected="false" data-dir="dep">Departures</button>
+    <nav class="tabs" role="tablist" aria-label="View">
+      <button class="tab" role="tab" id="tab-arr" aria-controls="view-board" aria-selected="true" data-tab="arr">Arrivals</button>
+      <button class="tab" role="tab" id="tab-dep" aria-controls="view-board" aria-selected="false" data-tab="dep">Departures</button>
+      <button class="tab" role="tab" id="tab-tracker" aria-controls="view-tracker" aria-selected="false" data-tab="tracker">Tracker</button>
     </nav>
   </header>
 
   <main>
+    <section id="view-board" class="view" role="tabpanel" aria-labelledby="tab-arr">
     <p class="intro">Ships arriving and departing Singapore: ferries at HarbourFront and Tanah Merah, cruise ships at Marina Bay and HarbourFront, and cargo vessels.</p>
     <div class="controls">
       <input id="search" class="search" type="search" placeholder="Search ship name, flag or IMO" autocomplete="off" spellcheck="false" aria-label="Search ships">
@@ -46,7 +49,7 @@
       <p id="note" class="note" hidden></p>
     </div>
 
-    <div id="board" class="board" role="tabpanel" aria-labelledby="tab-arr" aria-busy="true">
+    <div id="board" class="board" aria-busy="true">
       <p class="empty">Loading ships…</p>
     </div>
 
@@ -56,8 +59,28 @@
         Ferry times: Singapore Cruise Centre (<a href="https://singaporecruise.com.sg/schedule/ferries/" rel="noopener" target="_blank">singaporecruise.com.sg</a>).
         Unofficial app.</p>
     </footer>
-  </main>
+    </section>
 
+    <section id="view-tracker" class="view" role="tabpanel" aria-labelledby="tab-tracker" hidden>
+      <div id="map" class="map" aria-label="Map of ships around Singapore"></div>
+      <div class="map-top">
+        <div class="chips map-chips" role="group" aria-label="Ship type on the map">
+          <button type="button" data-mcat="all" aria-pressed="true">All</button>
+          <button type="button" data-mcat="ferry" aria-pressed="false">Ferries</button>
+          <button type="button" data-mcat="cruise" aria-pressed="false">Cruise</button>
+          <button type="button" data-mcat="cargo" aria-pressed="false">Cargo/Other</button>
+        </div>
+        <p id="map-note" class="map-note" aria-live="polite">Loading positions…</p>
+      </div>
+      <article id="card" class="card" aria-live="polite" aria-hidden="true">
+        <button class="card-close" type="button" aria-label="Close">×</button>
+        <div id="card-body"></div>
+      </article>
+    </section>
+  </main>
+  <div id="toast" class="toast" role="status"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js" crossorigin="anonymous" defer></script>
   <script src="config.js"></script>
   <script src="app.js" defer></script>
 </body>
