@@ -1,7 +1,7 @@
 {
   "name": "harbourlah",
   "short_name": "harbourlah",
-  "description": "Ships arriving and departing Singapore: ferries, cruise ships and cargo vessels.",
+  "description": "Ships arriving and departing Singapore: ferries at HarbourFront and Tanah Merah, cruise ships at Marina Bay and HarbourFront, and cargo vessels.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
