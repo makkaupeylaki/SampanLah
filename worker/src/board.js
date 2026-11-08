@@ -246,3 +246,44 @@ export function buildBoard(snap, ref, vessels, now = Date.now()) {
     dep: rows.dep,
   };
 }
+
+// ---------------------------------------------------------------- positions (Tracker)
+
+/**
+ * Slim positions + reference types -> { ships (each with c: category), types: { code: description } }.
+ * `types` holds only the codes present, so the page can name a ship's type without per-ship strings.
+ */
+export function categorisePositions(ships, ref) {
+  const all = (ref && ref.types) || {};
+  const types = {};
+  const out = (ships || []).map((s) => {
+    const desc = (s.tc && all[s.tc]) || "";
+    if (desc) types[s.tc] = titleCase(desc);
+    return { ...s, c: classify({ src: "mpa", typeDesc: desc, gt: s.g || 0, len: s.l || 0 }) };
+  });
+  return { ships: out, types };
+}
+
+/** Wrap stored positions for /api/positions with the same staleness rules as the board. */
+export function presentPositions(stored, now = Date.now()) {
+  const okAt = (stored && stored.okAt) || null;
+  const error = (stored && stored.error) || null;
+  return {
+    updatedAt: okAt,
+    checkedAt: (stored && stored.checkedAt) || null,
+    stale: !okAt || Boolean(error) || now - okAt > STALE_MS,
+    error,
+    count: ((stored && stored.ships) || []).length,
+    types: (stored && stored.types) || {},
+    ships: (stored && stored.ships) || [],
+  };
+}
+
+/** Positions as a vessels map for the board ({ key: [typeCode, length, 0, gt] }), for ships the 6-hourly snapshot misses. */
+export function positionsAsVessels(stored) {
+  const v = {};
+  for (const s of (stored && stored.ships) || []) {
+    if (s.imo && s.tc) v[`imo:${s.imo}`] = [s.tc, s.l || 0, 0, s.g || 0, "", ""];
+  }
+  return v;
+}
