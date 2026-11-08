@@ -11,21 +11,45 @@ export const CORE_FEEDS = ["dueArr", "arr", "dueDep", "dep"];
 
 // ---------------------------------------------------------------- categories
 
+// Berths, by MPA location code and (as a fallback) by MPA's location description.
+// Descriptions seen in the live data: "MARINA BAY CC BTH 1", "TANAH MERAH FERRY TERM",
+// "REGIONAL FERRY PLAT 1".."6", "MARINA SOUTH FERRY TML".
+//   CC01, CC01E, CC01W, CC02  HarbourFront Cruise Centre
+//   CM01, CM02                Marina Bay Cruise Centre
+//   RFT1-8, DFT5-8, TMFT, CFT regional/domestic ferry terminals (HarbourFront, Tanah Merah, Changi)
+const CRUISE_CODE = /^(CC0[12][EW]?|CM0[12])$/i;
+const FERRY_CODE = /^(RFT[1-8]|DFT[5-8]|TMFT|CFT)$/i;
+const CRUISE_DESC = /cruise|\bcc\s*bth\b|marina bay cc|harbou?rfront cc|\b(mbcc|hfcc)\b/i;
+const FERRY_DESC = /\bferry\b|\bfry\s*(term|tml|plat)/i;
+
+/** "cruise" | "ferry" | null for a berth, from its code or description. */
+export function berthKind(code, desc) {
+  if (code && CRUISE_CODE.test(code)) return "cruise";
+  if (code && FERRY_CODE.test(code)) return "ferry";
+  if (desc && CRUISE_DESC.test(desc)) return "cruise";
+  if (desc && FERRY_DESC.test(desc)) return "ferry";
+  return null;
+}
+
 /**
- * "ferry" | "cruise" | "cargo" (Cargo/Other). Based on MPA's vessel type description,
- * size, and the berth's location description; SCC rows are always ferries.
+ * "ferry" | "cruise" | "cargo" (Cargo/Other).
+ * 1. SCC rows are ferries.
+ * 2. A known vessel type decides: cruise/passenger/ferry types are cruise or ferry (by berth and
+ *    size); any other known type (tanker, tug, yacht, ...) is Cargo/Other, even at a ferry berth.
+ * 3. Unknown type (ship not in the particulars snapshot yet, e.g. still inbound): the berth decides.
+ * All text tests are case-insensitive. `berths` is a list of { code, desc }.
  */
-export function classify({ src, typeDesc, gt, len, locDescs = [] }) {
+export function classify({ src, typeDesc, gt = 0, len = 0, berths = [] }) {
   if (src === "scc") return "ferry";
-  const t = String(typeDesc || "").toUpperCase();
-  const where = locDescs.join(" ").toUpperCase();
-  if (/CRUISE/.test(t)) return "cruise";
-  if (/PASSENGER|FERRY/.test(t)) {
-    if (/CRUISE/.test(where) || gt >= 20000 || len >= 180) return "cruise";
-    return "ferry";
-  }
-  if (/CRUISE/.test(where) && !t) return "cruise";
-  if (/FERRY TERMINAL/.test(where) && !t) return "ferry";
+  const kinds = berths.map((b) => berthKind(b && b.code, b && b.desc));
+  const atCruise = kinds.includes("cruise");
+  const atFerry = kinds.includes("ferry");
+  const t = String(typeDesc || "");
+  if (/cruise/i.test(t)) return "cruise";
+  if (/passenger|ferry/i.test(t)) return atCruise || gt >= 20000 || len >= 180 ? "cruise" : "ferry";
+  if (t) return "cargo";
+  if (atCruise) return "cruise";
+  if (atFerry) return "ferry";
   return "cargo";
 }
 
@@ -71,6 +95,21 @@ function declIndex(decl) {
   return m;
 }
 
+/** Latest arrival berth code per ship (actual arrivals win over "due" entries at the same time). */
+function lastBerths(arrivals) {
+  const m = new Map();
+  const at = new Map();
+  for (const a of arrivals) {
+    if (!a.to) continue;
+    const k = vesselKey(a);
+    if (!m.has(k) || a.t >= at.get(k)) {
+      m.set(k, a.to);
+      at.set(k, a.t);
+    }
+  }
+  return m;
+}
+
 // ---------------------------------------------------------------- rows
 
 function mpaRow(dir, due, act, ctx) {
@@ -80,7 +119,8 @@ function mpaRow(dir, due, act, ctx) {
   const tc = p ? p[0] : "";
   const typeDesc = (tc && ctx.types[tc]) || "";
   const fromCode = (due && due.from) || (act && act.from) || "";
-  const toCode = (act && act.to) || (due && due.to) || "";
+  // Departures carry no berth; use where the same ship arrived (if it's in the arrival feeds).
+  const toCode = (act && act.to) || (due && due.to) || (dir === "dep" ? ctx.lastBerth.get(key) || "" : "");
   const loc = (c) => (c ? titleCase(ctx.locs[c] || c) : "");
   const decl = dir === "dep" ? ctx.decl.get(key) : null;
   const st = due ? due.t : null;
@@ -98,9 +138,13 @@ function mpaRow(dir, due, act, ctx) {
     fl: v.fl || null,
     tc: tc || null,
     type: typeDesc ? titleCase(typeDesc) : tc || null,
-    cat: classify({ src: "mpa", typeDesc, gt: p ? p[3] : 0, len: p ? p[1] : 0, locDescs: [ctx.locs[toCode] || "", ctx.locs[fromCode] || ""] }),
+    cat: classify({ src: "mpa", typeDesc, gt: p ? p[3] : 0, len: p ? p[1] : 0, berths: [
+      { code: toCode, desc: ctx.locs[toCode] || "" },
+      { code: fromCode, desc: ctx.locs[fromCode] || "" },
+    ] }),
     from: dir === "arr" ? loc(fromCode) || null : null,
     to: dir === "arr" ? loc(toCode) || null : (decl && decl.next ? titleCase(decl.next) : null),
+    loc: toCode || null, // MPA berth/anchorage code (for departures: where it arrived, if known)
     st,
     et: null,
     at,
@@ -168,6 +212,7 @@ export function buildBoard(snap, ref, vessels, now = Date.now()) {
     locs: (ref && ref.locs) || {},
     vessels: (vessels && vessels.v) || {},
     decl: declIndex(items("decl")),
+    lastBerth: lastBerths([...items("dueArr"), ...items("arr")]),
   };
 
   const rows = { arr: [], dep: [] };
