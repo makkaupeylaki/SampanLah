@@ -151,6 +151,61 @@ export function normaliseSnapshot(rows) {
   return out;
 }
 
+/** Degrees from the snapshot: prefer latitudeDegrees/longitudeDegrees; plain latitude/longitude may be radians. */
+function degrees(row) {
+  let lat = Number(row.latitudeDegrees);
+  let lon = Number(row.longitudeDegrees);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || (lat === 0 && lon === 0)) {
+    lat = Number(row.latitude);
+    lon = Number(row.longitude);
+    // Around Singapore, degrees are ~1.2 / ~103.8 and radians ~0.02 / ~1.81.
+    if (Number.isFinite(lon) && Math.abs(lon) < 2 * Math.PI && Math.abs(lat) < Math.PI / 2) {
+      lat = (lat * 180) / Math.PI;
+      lon = (lon * 180) / Math.PI;
+    }
+  }
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180 || (lat === 0 && lon === 0)) return null;
+  return [lat, lon];
+}
+
+const round = (x, d) => Math.round(x * 10 ** d) / 10 ** d;
+
+/**
+ * Positions snapshot -> slim ships for the map:
+ *   { n name, imo, fl flag, la, lo, h heading (deg, null if unknown), s speed (kn), tc type code, l length (m), g gross tonnage }
+ * Heading falls back to course; 511 / out of range means unknown.
+ */
+export function normalisePositions(rows) {
+  const out = [];
+  for (const row of rows || []) {
+    const pos = degrees(row || {});
+    if (!pos) continue;
+    const p = row.vesselParticulars || {};
+    const v = vessel(row);
+    let h = Number(row.heading);
+    if (!(h > 0 && h < 360)) {
+      const c = Number(row.course);
+      h = c >= 0 && c < 360 && !(c === 0 && !(Number(row.speed) > 0)) ? c : null;
+    }
+    const sp = Number(row.speed);
+    const ship = { n: v.n || v.cs || v.imo || clean(p.mmsiNumber), la: round(pos[0], 5), lo: round(pos[1], 5) };
+    if (v.imo) ship.imo = v.imo;
+    if (v.fl) ship.fl = v.fl;
+    if (h !== null) ship.h = Math.round(h);
+    if (Number.isFinite(sp) && sp >= 0 && sp < 80) ship.s = round(sp, 1);
+    const tc = clean(p.vesselType).toUpperCase();
+    if (tc) ship.tc = tc;
+    if (Number(p.vesselLength) > 0) ship.l = Math.round(Number(p.vesselLength));
+    if (Number(p.grossTonnage) > 0) ship.g = Math.round(Number(p.grossTonnage));
+    out.push(ship);
+  }
+  return out;
+}
+
+export async function fetchPositions(env) {
+  return normalisePositions(await mpaGet(env, "/vessel/positions/1.0.0/snapshot"));
+}
+
 /** Reference list -> { code: description }. */
 export function normaliseRef(rows, codeField, descField) {
   const out = {};
