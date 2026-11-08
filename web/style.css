@@ -73,6 +73,7 @@ body.tracker-on main { max-width: none; }
 
 /* ------------------------------------------------------------ controls */
 .intro { margin: 0; padding: 14px 16px 0; color: var(--muted); font-size: 14px; line-height: 1.45; text-wrap: balance; }
+.intro-sub { margin: 0; padding: 3px 16px 0; color: var(--muted); font-size: 12.5px; line-height: 1.4; letter-spacing: 0.02em; }
 .controls { padding: 14px 16px 8px; display: flex; flex-direction: column; gap: 12px; }
 .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 
