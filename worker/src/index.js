@@ -4,14 +4,17 @@
 //   cron 7 */6      -> refresh reference data (vessel types, locations) and the particulars snapshot
 //   GET /api/board  -> arrivals + departures built from KV (no-store)
 //   GET /api/vessel?imo=1234567 | ?cs=9V1234 -> one vessel's particulars (live, cached, never in KV)
+//   GET /api/positions -> slim live positions for the Tracker (stored by the */10 cron, no-store)
 
-import { mpaFeeds, fetchSnapshot, fetchReference, fetchParticulars } from "./mpa.js";
+import { mpaFeeds, fetchSnapshot, fetchReference, fetchParticulars, fetchPositions } from "./mpa.js";
 import { fetchFerries } from "./scc.js";
-import { buildBoard } from "./board.js";
+import { buildBoard, categorisePositions, presentPositions, positionsAsVessels } from "./board.js";
 
 const SNAP_KEY = "snap";
 const REF_KEY = "ref";
 const VESSELS_KEY = "vessels";
+const POS_KEY = "positions";
+const POS_MEMO_MS = 20e3; // per-isolate memo of stored positions (saves KV reads)
 const REF_MAX_AGE_MS = 24 * 3600e3;
 const BOARD_MEMO_MS = 20e3; // per-isolate memo of the built board (saves KV reads)
 const REF_MEMO_MS = 10 * 60e3;
@@ -91,6 +94,33 @@ export async function refreshBoard(env, now = Date.now()) {
     "board: " + names.map((n) => `${n}=${feeds[n].error ? "ERR" : feeds[n].items.length}`).join(" ")
   );
   return snap;
+}
+
+// ---------------------------------------------------------------- cron: positions
+
+/**
+ * Fetch the MPA positions snapshot, slim it and store it: at most 1 KV write.
+ * On failure the previous ships are kept; the error is written only when it starts
+ * (so a long outage doesn't cost a write per tick), and staleness follows okAt.
+ */
+export async function refreshPositions(env, now = Date.now()) {
+  const [prev, ref] = await Promise.all([
+    env.BOARD_KV.get(POS_KEY, "json"),
+    env.BOARD_KV.get(REF_KEY, "json"),
+  ]);
+  try {
+    const { ships, types } = categorisePositions(await fetchPositions(env), ref);
+    if (!ships.length) throw new Error("positions snapshot was empty");
+    const next = { okAt: now, checkedAt: now, error: null, types, ships };
+    await env.BOARD_KV.put(POS_KEY, JSON.stringify(next));
+    console.log(`positions: ${ships.length} ships`);
+    return next;
+  } catch (e) {
+    console.error(`positions failed: ${errMsg(e)}`);
+    const next = { ...(prev || { okAt: null, types: {}, ships: [] }), error: errMsg(e), checkedAt: now };
+    if (!prev || !prev.error) await env.BOARD_KV.put(POS_KEY, JSON.stringify(next));
+    return next;
+  }
 }
 
 // ---------------------------------------------------------------- cron: reference data
@@ -199,6 +229,28 @@ async function boardRefs(env, ctx) {
   return { ref: fetched.ref || refs.ref, vessels: fetched.vessels || refs.vessels };
 }
 
+let posInflight = null;
+
+/** Stored positions (memoised ~20 s). On a fresh deploy, fetch once (one shared fetch per isolate). */
+async function getPositions(env, { seed = false } = {}) {
+  const hit = memoGet("positions", POS_MEMO_MS);
+  if (hit !== undefined && (hit || !seed)) return hit;
+  let stored = await env.BOARD_KV.get(POS_KEY, "json");
+  if (!stored && seed) {
+    posInflight = posInflight || refreshPositions(env).finally(() => { posInflight = null; });
+    stored = await posInflight;
+  }
+  return memoSet("positions", stored);
+}
+
+async function handlePositions(env) {
+  const hit = memoGet("positions-body", POS_MEMO_MS);
+  if (hit) return json(hit);
+  const body = presentPositions(await getPositions(env, { seed: true }));
+  memoSet("positions-body", body);
+  return json(body);
+}
+
 async function handleBoard(env, ctx) {
   const hit = memoGet("board", BOARD_MEMO_MS);
   if (hit) return json(hit);
@@ -210,8 +262,13 @@ async function handleBoard(env, ctx) {
     source = "live";
   }
   const refs = await boardRefs(env, ctx);
+  // Fresher types/lengths from the 10-minute positions for ships the 6-hourly snapshot doesn't have yet.
+  const positions = await getPositions(env);
+  const vessels = positions
+    ? { ...(refs.vessels || {}), v: { ...positionsAsVessels(positions), ...((refs.vessels && refs.vessels.v) || {}) } }
+    : refs.vessels;
   const body = {
-    ...buildBoard(snap, refs.ref, refs.vessels),
+    ...buildBoard(snap, refs.ref, vessels),
     source,
     // Without reference data every MPA ship would read "Cargo/Other"; the page shows a hint.
     typesUnavailable: !refsComplete(refs),
@@ -257,8 +314,9 @@ export default {
     try {
       if (url.pathname === "/api/board") res = await handleBoard(env, ctx);
       else if (url.pathname === "/api/vessel") res = await handleVessel(env, ctx, url);
+      else if (url.pathname === "/api/positions") res = await handlePositions(env);
       else if (url.pathname === "/" || url.pathname === "/api") {
-        res = json({ name: "harbourlah", endpoints: ["/api/board", "/api/vessel?imo=", "/api/vessel?cs="] });
+        res = json({ name: "harbourlah", endpoints: ["/api/board", "/api/positions", "/api/vessel?imo=", "/api/vessel?cs="] });
       } else res = json({ error: "Not found" }, { status: 404 });
     } catch (e) {
       console.error(e);
@@ -282,6 +340,8 @@ export default {
           env.BOARD_KV.get(VESSELS_KEY, "json"),
         ]);
         if (!refsComplete({ ref, vessels })) await lazyRefs(env);
+        // Last, as the heaviest step (~600 KB of JSON): if it fails, the board is already saved.
+        await refreshPositions(env);
       })()
     );
   },
