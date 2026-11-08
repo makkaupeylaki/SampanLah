@@ -17,6 +17,10 @@ const BOARD_MEMO_MS = 20e3; // per-isolate memo of the built board (saves KV rea
 const REF_MEMO_MS = 10 * 60e3;
 const VESSEL_CACHE_S = 6 * 3600;
 const REF_CRON = "7 */6 * * *";
+const REF_LOCK_KEY = "ref-attempt"; // short-lived KV marker: a lazy reference fetch was tried recently
+const REF_RETRY_MS = 30 * 60e3; // at most one lazy reference fetch per 30 min (across isolates)
+const REF_WAIT_MS = 8e3; // how long /api/board waits for a lazy fetch before answering without it
+const REF_MISSING_MEMO_MS = 60e3; // re-check KV soon when reference data is missing
 
 // ---------------------------------------------------------------- helpers
 
@@ -91,9 +95,12 @@ export async function refreshBoard(env, now = Date.now()) {
 
 // ---------------------------------------------------------------- cron: reference data
 
-/** Vessel types + location codes (daily) and the particulars snapshot (every run). <= 2 KV writes. */
+/**
+ * Vessel types + location codes (daily) and the particulars snapshot (every run). <= 2 KV writes.
+ * Returns what is now stored: { ref, vessels } (the previous copy for a part that failed).
+ */
 export async function refreshReference(env, now = Date.now(), { force = false } = {}) {
-  const [ref, vessels] = await Promise.all([
+  let [ref, vessels] = await Promise.all([
     env.BOARD_KV.get(REF_KEY, "json"),
     env.BOARD_KV.get(VESSELS_KEY, "json"),
   ]);
@@ -107,6 +114,7 @@ export async function refreshReference(env, now = Date.now(), { force = false } 
         errors: r.errors,
       };
       await env.BOARD_KV.put(REF_KEY, JSON.stringify(next));
+      ref = next;
     } catch (e) {
       console.error(`reference failed: ${errMsg(e)}`);
     }
@@ -114,23 +122,81 @@ export async function refreshReference(env, now = Date.now(), { force = false } 
   if (force || !vessels || now - vessels.at > 5 * 3600e3) {
     try {
       const v = await fetchSnapshot(env);
-      if (Object.keys(v).length) await env.BOARD_KV.put(VESSELS_KEY, JSON.stringify({ at: now, v }));
+      if (Object.keys(v).length) {
+        vessels = { at: now, v };
+        await env.BOARD_KV.put(VESSELS_KEY, JSON.stringify(vessels));
+      }
     } catch (e) {
       console.error(`snapshot failed: ${errMsg(e)}`);
     }
   }
+  return { ref, vessels };
+}
+
+/** Ship labels need both the type/location lists and the per-ship snapshot. */
+export const refsComplete = ({ ref, vessels } = {}) =>
+  Boolean(
+    ref && ref.types && Object.keys(ref.types).length &&
+    vessels && vessels.v && Object.keys(vessels.v).length
+  );
+
+// Lazy reference fetch, guarded so it runs at most once at a time per isolate (shared promise)
+// and at most once per REF_RETRY_MS across isolates (KV marker with a TTL). Costs <= 3 KV writes
+// per attempt (marker, ref, vessels), and attempts stop as soon as the data is in KV.
+let refInflight = null;
+let refTriedAt = 0;
+
+/** Start (or join) a lazy reference fetch. Returns its promise, or null when one was tried recently. */
+export function lazyRefs(env, now = Date.now()) {
+  if (refInflight) return refInflight;
+  if (now - refTriedAt < REF_RETRY_MS) return null;
+  refTriedAt = now;
+  refInflight = (async () => {
+    if (await env.BOARD_KV.get(REF_LOCK_KEY)) return null; // another isolate tried recently
+    await env.BOARD_KV.put(REF_LOCK_KEY, String(now), { expirationTtl: REF_RETRY_MS / 1000 });
+    const refs = await refreshReference(env, now);
+    memoSet("refs", refs);
+    return refs;
+  })()
+    .catch((e) => {
+      console.error(`lazy reference fetch failed: ${errMsg(e)}`);
+      return null;
+    })
+    .finally(() => {
+      refInflight = null;
+    });
+  return refInflight;
+}
+
+export function resetRefGuard() {
+  refInflight = null;
+  refTriedAt = 0;
 }
 
 // ---------------------------------------------------------------- API
 
 async function getRefs(env) {
   const hit = memoGet("refs", REF_MEMO_MS);
-  if (hit) return hit;
+  // A copy missing reference data is only trusted briefly, so the cron's next write is seen soon.
+  if (hit && (refsComplete(hit) || memoGet("refs", REF_MISSING_MEMO_MS))) return hit;
   const [ref, vessels] = await Promise.all([
     env.BOARD_KV.get(REF_KEY, "json"),
     env.BOARD_KV.get(VESSELS_KEY, "json"),
   ]);
   return memoSet("refs", { ref, vessels });
+}
+
+/** Reference data for the board; if KV lacks it, fetch it once (guarded), waiting up to REF_WAIT_MS. */
+async function boardRefs(env, ctx) {
+  const refs = await getRefs(env);
+  if (refsComplete(refs)) return refs;
+  const pending = lazyRefs(env);
+  if (!pending) return refs;
+  ctx.waitUntil(pending); // let it finish and store even if we stop waiting
+  const fetched = await Promise.race([pending, new Promise((r) => setTimeout(() => r(null), REF_WAIT_MS))]);
+  if (!fetched) return refs;
+  // Keep whatever part was already present if the fetch only filled the other.
+  return { ref: fetched.ref || refs.ref, vessels: fetched.vessels || refs.vessels };
 }
 
 async function handleBoard(env, ctx) {
@@ -142,10 +208,14 @@ async function handleBoard(env, ctx) {
     // Cold start (cron hasn't run yet): fetch now and seed KV.
     snap = await refreshBoard(env);
     source = "live";
-    ctx.waitUntil(refreshReference(env).then(() => memo.delete("refs")));
   }
-  const { ref, vessels } = await getRefs(env);
-  const body = { ...buildBoard(snap, ref, vessels), source };
+  const refs = await boardRefs(env, ctx);
+  const body = {
+    ...buildBoard(snap, refs.ref, refs.vessels),
+    source,
+    // Without reference data every MPA ship would read "Cargo/Other"; the page shows a hint.
+    typesUnavailable: !refsComplete(refs),
+  };
   memoSet("board", body);
   return json(body);
 }
@@ -206,9 +276,12 @@ export default {
     ctx.waitUntil(
       (async () => {
         await refreshBoard(env);
-        // First run only: reference data and the particulars snapshot are missing.
-        const ref = await env.BOARD_KV.get(REF_KEY);
-        if (!ref) await refreshReference(env);
+        // Reference data missing (fresh deploy, failed 6-hourly run): same guarded lazy fetch.
+        const [ref, vessels] = await Promise.all([
+          env.BOARD_KV.get(REF_KEY, "json"),
+          env.BOARD_KV.get(VESSELS_KEY, "json"),
+        ]);
+        if (!refsComplete({ ref, vessels })) await lazyRefs(env);
       })()
     );
   },
