@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import worker, { refreshBoard, refreshReference, clearMemo } from "../src/index.js";
+import worker, { refreshBoard, refreshReference, clearMemo, resetRefGuard } from "../src/index.js";
 import { buildBoard, classify } from "../src/board.js";
 import { parseFerryPage, slotsFor, operatorName } from "../src/scc.js";
 import { normaliseMovements, normaliseSnapshot, vesselKey } from "../src/mpa.js";
@@ -209,4 +209,70 @@ test("normalisers drop junk and key vessels sensibly", () => {
   assert.equal(items[0].imo, "");
   assert.equal(vesselKey(items[0]), "n:OCEANA BLUE");
   assert.deepEqual(Object.keys(normaliseSnapshot([{ vesselParticulars: vp("A", "9214898", "OVYQ2") }])), ["imo:9214898"]);
+});
+
+// ---------------------------------------------------------------- reference data fallback
+
+const refCalls = (calls) => calls.filter((c) => /\/reference\/|\/snapshot/.test(c.url)).length;
+async function boardReq(e) {
+  const ctx = makeCtx();
+  const res = await worker.fetch(new Request("https://w.example/api/board"), e, ctx);
+  await ctx.drain();
+  return res.json();
+}
+async function seeded() {
+  clearMemo();
+  resetRefGuard();
+  const e = env();
+  mockUpstream();
+  await refreshBoard(e, Date.now());
+  return e;
+}
+
+test("missing reference data is fetched lazily once, stored, and used for labels", async () => {
+  const e = await seeded();
+  const calls = mockUpstream();
+  const writesBefore = e.BOARD_KV.writes;
+  const [a, b, c] = await Promise.all([boardReq(e), boardReq(e), boardReq(e)]);
+  assert.equal(refCalls(calls), 3, "types + locations + snapshot fetched exactly once for 3 concurrent requests");
+  for (const body of [a, b, c]) {
+    assert.equal(body.typesUnavailable, false);
+    const cruise = body.arr.find((r) => r.name === "SPECTRUM OF THE SEAS");
+    if (cruise) assert.equal(cruise.cat, "cruise");
+  }
+  assert.ok(await e.BOARD_KV.get("ref") && await e.BOARD_KV.get("vessels"), "stored in KV");
+  assert.equal(e.BOARD_KV.writes - writesBefore, 3, "marker + ref + vessels");
+  clearMemo();
+  await boardReq(e);
+  assert.equal(refCalls(calls), 3, "not refetched once stored");
+});
+
+test("failed reference fetch: board still served, flagged, and not retried per request", async () => {
+  const e = await seeded();
+  const calls = mockUpstream({ fail: new Set(["types", "locs", "snapshot"]) });
+  const body = await boardReq(e);
+  assert.equal(body.typesUnavailable, true);
+  assert.ok(body.arr.length > 0, "board still served");
+  assert.ok(body.arr.filter((r) => r.src === "mpa").every((r) => r.cat === "cargo"));
+  const after = refCalls(calls);
+  clearMemo();
+  await boardReq(e);
+  clearMemo();
+  await boardReq(e);
+  assert.equal(refCalls(calls), after, "no refetch inside the retry window");
+  // Another isolate (fresh in-memory guard) sees the KV marker and doesn't refetch either.
+  resetRefGuard();
+  clearMemo();
+  await boardReq(e);
+  assert.equal(refCalls(calls), after, "KV marker stops other isolates");
+});
+
+test("cron tick fills missing reference data through the same guard", async () => {
+  const e = await seeded();
+  const calls = mockUpstream();
+  const ctx = makeCtx();
+  await worker.scheduled({ cron: "*/10 * * * *" }, e, ctx);
+  await ctx.drain();
+  assert.equal(refCalls(calls), 3);
+  assert.ok(await e.BOARD_KV.get("ref"));
 });
