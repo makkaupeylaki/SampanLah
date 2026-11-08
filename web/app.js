@@ -205,14 +205,19 @@ function renderUpdated() {
 
 function renderNote() {
   const el = $("#note");
-  const scc = state.data && state.data.sources && state.data.sources.scc;
-  const show = scc && scc.error && (state.cat === "all" || state.cat === "ferry");
-  el.hidden = !show;
-  if (show) {
-    el.textContent = scc.okAt
-      ? `Ferry terminal board not updating (last good ${hm(scc.okAt)} SGT).`
-      : "Ferry terminal board unavailable right now; ferries shown come from MPA declarations only.";
+  const lines = [];
+  // Without MPA's reference data the Worker can't tell ship types apart.
+  if (state.data && state.data.typesUnavailable) {
+    lines.push("Ship types unavailable right now, so most ships show as Cargo/Other.");
   }
+  const scc = state.data && state.data.sources && state.data.sources.scc;
+  if (scc && scc.error && (state.cat === "all" || state.cat === "ferry")) {
+    lines.push(scc.okAt
+      ? `Ferry terminal board not updating (last good ${hm(scc.okAt)} SGT).`
+      : "Ferry terminal board unavailable right now; ferries shown come from MPA declarations only.");
+  }
+  el.hidden = !lines.length;
+  el.textContent = lines.join(" ");
 }
 
 function renderChips() {
