@@ -44,7 +44,7 @@ MPA says these feeds update about hourly (the positions snapshot every 3 min).
 ## API
 
 - `GET /api/board`:
-  `{ updatedAt, checkedAt, stale, source, sources: { mpa, scc }, arr: Ship[], dep: Ship[] }`.
+  `{ updatedAt, checkedAt, stale, source, typesUnavailable, sources: { mpa, scc }, arr: Ship[], dep: Ship[] }`.
   `updatedAt` is when the oldest working source last succeeded; `stale` is true when a source is failing
   or older than 15 min. Rows cover the past 12 h and next 24 h.
 - `GET /api/vessel?imo=1234567` (or `?cs=CALLSIGN`): `{ vessel: { n, imo, cs, fl, typeCode, len, beam, gt, built, … } }`.
@@ -71,6 +71,10 @@ Local dev: put `MPA_API_KEY=…` in `worker/.dev.vars` (git-ignored), `npm run d
 ## Free-tier budget
 
 - **KV writes:** 1 per board tick (144/day) + ≤ 2 per 6-hourly reference tick (≤ 8/day) ≈ 152/day.
+  If reference data is missing from KV (fresh deploy, failed 6-hourly run), `/api/board` or the next board
+  tick fetches it lazily: one fetch at a time per isolate, at most one per 30 min across isolates (a
+  `ref-attempt` KV marker with a TTL), ≤ 3 writes per attempt. `/api/board` waits up to 8 s for it; if it
+  fails, the board is served anyway with `typesUnavailable: true` and the page shows a short hint.
 - **Subrequests per tick:** 5 MPA + up to 12 SCC pages (2 directions × current and next 6 h slot × ≤ 3 pages).
 - **KV reads:** `/api/board` is memoised per isolate for 20 s; reference data for 10 min.
 - **CPU:** the positions snapshot (every vessel in port) is the heaviest parse, so it runs in its own
