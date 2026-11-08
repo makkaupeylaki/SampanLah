@@ -13,7 +13,7 @@ crons = ["*/10 * * * *", "7 */6 * * *"]
 # then paste the returned id below (replacing the zeros) and commit it.
 [[kv_namespaces]]
 binding = "BOARD_KV"
-id = "00000000000000000000000000000000"
+id = "b4642f3ae883491e9b6e80568531ed89"
 
 [vars]
 # Comma-separated list of origins allowed to call the API ("*" = any).
