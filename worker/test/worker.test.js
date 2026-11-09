@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import worker, { refreshBoard, refreshReference, clearMemo, resetRefGuard } from "../src/index.js";
+import worker, { refreshBoard, refreshReference, clearMemo, resetRefGuard, sccDue } from "../src/index.js";
 import { buildBoard, classify } from "../src/board.js";
 import { parseFerryPage, slotsFor, operatorName } from "../src/scc.js";
 import { normaliseMovements, normaliseSnapshot, normalisePositions, vesselKey } from "../src/mpa.js";
@@ -138,7 +138,7 @@ test("a failing feed keeps its last good items and marks the board stale", async
   mockUpstream();
   await refreshBoard(e, NOW);
   mockUpstream({ fail: new Set(["arr", "dueArr", "scc"]) });
-  const later = NOW + 20 * 60e3;
+  const later = NOW + 30 * 60e3; // SCC is only re-fetched every 30 min
   const snap = await refreshBoard(e, later);
   assert.equal(snap.feeds.arr.items.length, 1, "kept");
   assert.equal(snap.feeds.arr.okAt, NOW);
@@ -401,4 +401,66 @@ test("SCC blocked after working once: board follows MPA, not stale; SCC state st
   assert.equal(b.sources.scc.stale, true);
   assert.equal(b.sources.scc.okAt, NOW);
   assert.match(b.sources.scc.error, /bot protection/);
+});
+
+// ---------------------------------------------------------------- SCC every 30 min
+
+const sccCalls = (calls) => calls.filter((c) => c.url.startsWith("https://singaporecruise.com.sg/")).length;
+const mpaCalls = (calls) => calls.filter((c) => c.url.includes("oceans-x.mpa.gov.sg")).length;
+
+test("SCC page is fetched every 30 min while MPA refreshes every 10 min", async () => {
+  const e = env();
+  const calls = mockUpstream();
+  await refreshBoard(e, NOW);
+  const scc0 = sccCalls(calls);
+  assert.ok(scc0 > 0, "first tick fetches SCC");
+  for (const m of [10, 20]) {
+    const snap = await refreshBoard(e, NOW + m * 60e3);
+    assert.equal(sccCalls(calls), scc0, `no SCC fetch at +${m} min`);
+    assert.equal(snap.feeds.scc.okAt, NOW, "last SCC result carried over");
+    assert.equal(snap.feeds.scc.items.length, 4, "ferry rows kept");
+    assert.equal(snap.feeds.dueArr.okAt, NOW + m * 60e3, "MPA refreshed");
+  }
+  assert.equal(mpaCalls(calls), 15, "5 MPA feeds x 3 ticks");
+  // A cron tick a few seconds early still counts as 30 min.
+  await refreshBoard(e, NOW + 30 * 60e3 - 5e3);
+  assert.ok(sccCalls(calls) > scc0, "SCC fetched again at ~+30 min");
+});
+
+test("SCC not stale between 30-minute fetches; stale once a fetch is missed", async () => {
+  const e = env();
+  mockUpstream();
+  const snap = await refreshBoard(e, NOW);
+  assert.equal(buildBoard(snap, null, null, NOW + 25 * 60e3).sources.scc.stale, false);
+  assert.equal(buildBoard(snap, null, null, NOW + 50 * 60e3).sources.scc.stale, true);
+});
+
+test("challenged SCC fetch: last good rows and error kept, no retry until 30 min later", async () => {
+  const e = env();
+  mockUpstream();
+  await refreshBoard(e, NOW);
+  let calls = mockUpstream({ fail: new Set(["scc"]) });
+  const t1 = NOW + 30 * 60e3;
+  let snap = await refreshBoard(e, t1);
+  assert.equal(sccCalls(calls), 1, "one request, stops at the challenge page");
+  assert.match(snap.feeds.scc.error, /bot protection/);
+  assert.equal(snap.feeds.scc.okAt, NOW);
+  assert.equal(snap.feeds.scc.items.length, 4);
+  const b = buildBoard(snap, null, null, t1);
+  assert.equal(b.stale, false, "MPA fresh");
+  assert.equal(b.sources.scc.okAt, NOW, "the page's note shows last good time");
+  calls = mockUpstream({ fail: new Set(["scc"]) });
+  for (const m of [10, 20]) snap = await refreshBoard(e, t1 + m * 60e3);
+  assert.equal(sccCalls(calls), 0, "no retries before the next 30-minute slot");
+  assert.match(snap.feeds.scc.error, /bot protection/, "error still reported");
+  await refreshBoard(e, t1 + 30 * 60e3);
+  assert.equal(sccCalls(calls), 1, "retried once at the next slot");
+});
+
+test("SCC requests keep the honest User-Agent", async () => {
+  const calls = mockUpstream();
+  await refreshBoard(env(), NOW);
+  const ua = calls.filter((c) => c.url.startsWith("https://singaporecruise.com.sg/")).map((c) => c.headers["User-Agent"]);
+  assert.ok(ua.length && ua.every((u) => /^harbourlah\/1\.0 \(\+https:\/\/harbourlah\.pages\.dev/.test(u)), ua[0]);
+  assert.equal(sccDue(null, NOW), true);
 });

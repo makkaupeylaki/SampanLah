@@ -2,6 +2,7 @@
 // Pure functions: no fetches, no KV, easy to test.
 
 import { vesselKey } from "./mpa.js";
+import { SCC_FETCH_INTERVAL_MS } from "./scc.js";
 
 export const STALE_MS = 15 * 60e3; // a source older than this is flagged stale
 const MATCH_WINDOW_MS = 12 * 3600e3; // due vs actual of the same ship must be this close
@@ -190,13 +191,13 @@ const shownTime = (r) => r.at || r.et || r.st;
 
 // ---------------------------------------------------------------- sources
 
-function sourceState(feeds, names, now) {
+function sourceState(feeds, names, now, maxAgeMs = STALE_MS) {
   const fs = names.map((n) => feeds[n]).filter(Boolean);
   if (!fs.length) return { okAt: null, error: "not fetched yet", stale: true };
   const oks = fs.map((f) => f.okAt || 0);
   const okAt = Math.min(...oks) || null;
   const error = (fs.find((f) => f.error) || {}).error || null;
-  return { okAt, error, stale: Boolean(error) || !okAt || now - okAt > STALE_MS };
+  return { okAt, error, stale: Boolean(error) || !okAt || now - okAt > maxAgeMs };
 }
 
 /**
@@ -233,7 +234,8 @@ export function buildBoard(snap, ref, vessels, now = Date.now()) {
   }
 
   const mpa = sourceState(feeds, CORE_FEEDS, now);
-  const scc = sourceState(feeds, ["scc"], now);
+  // SCC is fetched every 30 min, so it's only stale once it misses a fetch (30 + 15 min).
+  const scc = sourceState(feeds, ["scc"], now, SCC_FETCH_INTERVAL_MS + STALE_MS);
   // "Updated" and `stale` follow MPA, the main source. The SCC ferry board is a secondary source behind
   // bot protection that can block it for hours; its own state is in sources.scc and the page shows it
   // as a ferry note, so a blocked SCC never makes fresh MPA data look stale. If MPA has never

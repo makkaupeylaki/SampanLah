@@ -1,13 +1,13 @@
 // harbourlah Worker: cron fetcher + JSON API.
 //
-//   cron */10       -> fetch MPA feeds + SCC ferry board, keep last good copy per feed, 1 KV write
+//   cron */10       -> fetch MPA feeds (+ SCC ferry board every 30 min), keep last good copy per feed, 1 KV write
 //   cron 7 */6      -> refresh reference data (vessel types, locations) and the particulars snapshot
 //   GET /api/board  -> arrivals + departures built from KV (no-store)
 //   GET /api/vessel?imo=1234567 | ?cs=9V1234 -> one vessel's particulars (live, cached, never in KV)
 //   GET /api/positions -> slim live positions for the Tracker (stored by the */10 cron, no-store)
 
 import { mpaFeeds, fetchSnapshot, fetchReference, fetchParticulars, fetchPositions } from "./mpa.js";
-import { fetchFerries } from "./scc.js";
+import { fetchFerries, SCC_FETCH_INTERVAL_MS, SCC_FETCH_SLACK_MS } from "./scc.js";
 import { buildBoard, categorisePositions, presentPositions, positionsAsVessels } from "./board.js";
 
 const SNAP_KEY = "snap";
@@ -67,14 +67,24 @@ const errMsg = (e) => String((e && e.message) || e).slice(0, 300);
 
 // ---------------------------------------------------------------- cron: board
 
+/** Is the SCC ferry page due? At most one attempt per SCC_FETCH_INTERVAL_MS, success or failure. */
+export function sccDue(prevScc, now) {
+  if (!prevScc) return true;
+  const triedAt = prevScc.triedAt || Math.max(prevScc.okAt || 0, prevScc.failedAt || 0);
+  return now - triedAt >= SCC_FETCH_INTERVAL_MS - SCC_FETCH_SLACK_MS;
+}
+
 /**
- * Fetch every feed. A feed that fails keeps its previous items and okAt and gets an
- * `error`, so the board keeps showing the last good data, flagged stale.
+ * Fetch every MPA feed, and the SCC ferry page when it's due (every 30 min). A feed that fails
+ * keeps its previous items and okAt and gets an `error`, so the board keeps showing the last good
+ * data; a skipped SCC fetch carries the previous SCC entry over unchanged.
  * Exactly one KV write. Returns the new snapshot.
  */
 export async function refreshBoard(env, now = Date.now()) {
   const prev = (await env.BOARD_KV.get(SNAP_KEY, "json")) || { feeds: {} };
-  const jobs = { ...mpaFeeds(now), scc: () => fetchFerries(now) };
+  const prevScc = (prev.feeds && prev.feeds.scc) || null;
+  const jobs = { ...mpaFeeds(now) };
+  if (sccDue(prevScc, now)) jobs.scc = () => fetchFerries(now);
   const names = Object.keys(jobs);
   const results = await Promise.allSettled(names.map((n) => jobs[n](env)));
   const feeds = {};
@@ -82,16 +92,18 @@ export async function refreshBoard(env, now = Date.now()) {
     const r = results[i];
     const old = (prev.feeds && prev.feeds[n]) || null;
     if (r.status === "fulfilled") {
-      feeds[n] = { okAt: now, error: null, items: r.value };
+      feeds[n] = { okAt: now, error: null, triedAt: now, items: r.value };
     } else {
       console.error(`feed ${n} failed: ${errMsg(r.reason)}`);
-      feeds[n] = { okAt: old ? old.okAt : null, error: errMsg(r.reason), failedAt: now, items: old ? old.items : [] };
+      feeds[n] = { okAt: old ? old.okAt : null, error: errMsg(r.reason), failedAt: now, triedAt: now, items: old ? old.items : [] };
     }
   });
+  if (!jobs.scc && prevScc) feeds.scc = prevScc; // not due yet: keep the last result as is
   const snap = { checkedAt: now, feeds };
   await env.BOARD_KV.put(SNAP_KEY, JSON.stringify(snap));
   console.log(
-    "board: " + names.map((n) => `${n}=${feeds[n].error ? "ERR" : feeds[n].items.length}`).join(" ")
+    "board: " + names.map((n) => `${n}=${feeds[n].error ? "ERR" : feeds[n].items.length}`).join(" ") +
+      (jobs.scc ? "" : " scc=skipped (fetched every 30 min)")
   );
   return snap;
 }

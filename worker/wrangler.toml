@@ -3,7 +3,7 @@ main = "src/index.js"
 compatibility_date = "2026-10-01"
 
 # Crons (UTC):
-#   */10        refresh the board (MPA feeds + Singapore Cruise Centre ferry board), 1 KV write
+#   */10        refresh the board (MPA feeds; Singapore Cruise Centre ferry board only every 30 min), 1 KV write
 #   7 */6       refresh reference data: vessel types, location codes, vessel particulars snapshot
 [triggers]
 crons = ["*/10 * * * *", "7 */6 * * *"]

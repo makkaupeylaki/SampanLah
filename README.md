@@ -6,7 +6,7 @@ Same shape as flightlah, on the Cloudflare free tier:
 
 ```
 Worker cron */10 ──► MPA OCEANS-X (due/actual arrivals + departures, departure declarations)
-                 ──► Singapore Cruise Centre ferry board (HTML)
+                 ──► Singapore Cruise Centre ferry board (HTML, every 30 min, not every tick)
                  ──► normalise ──► Workers KV "snap" (1 write; failed feeds keep their last good copy)
                  ──► MPA positions snapshot ──► slim ──► Workers KV "positions" (1 write)
 Worker cron 7 */6 ──► MPA reference data (vessel types, location codes) + particulars snapshot ──► KV
@@ -87,7 +87,11 @@ Local dev: put `MPA_API_KEY=…` in `worker/.dev.vars` (git-ignored), `npm run d
   tick fetches it lazily: one fetch at a time per isolate, at most one per 30 min across isolates (a
   `ref-attempt` KV marker with a TTL), ≤ 3 writes per attempt. `/api/board` waits up to 8 s for it; if it
   fails, the board is served anyway with `typesUnavailable: true` and the page shows a short hint.
-- **Subrequests per tick:** 6 MPA (incl. positions) + up to 12 SCC pages (2 directions × current and next 6 h slot × ≤ 3 pages).
+- **Subrequests per tick:** 6 MPA (incl. positions), plus up to 12 SCC pages (2 directions × current and next 6 h
+  slot × ≤ 3 pages) on every third tick only: the SCC page is fetched at most every 30 min, success or failure,
+  so a blocked or challenged fetch is retried 30 min later (one request, which stops at the challenge page).
+  Between fetches the last SCC result is carried over unchanged; SCC is flagged stale only after it misses a
+  fetch (45 min).
 - **KV reads:** `/api/board` and `/api/positions` are memoised per isolate for 20 s; reference data for 10 min.
 - **CPU:** the positions snapshot (~600 KB of JSON) is the heaviest parse. On the 10-minute tick it runs
   last, after the board is saved, so if it ever exceeds the CPU limit the board is unaffected; the Tracker

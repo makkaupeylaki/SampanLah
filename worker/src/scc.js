@@ -14,6 +14,10 @@ const SLOTS = ["00:00hrs-05:59hrs", "06:00hrs-11:59hrs", "12:00hrs-17:59hrs", "1
 const MAX_PAGES_PER_QUERY = 3;
 const MAX_REQUESTS = 12; // per cron run, both directions together
 const TIMEOUT_MS = 15e3;
+// Fetch the SCC page at most every 30 min (the MPA feeds stay on the 10-minute cron). The cron runs
+// every 10 min, so the slack lets a tick a few seconds early still count as "30 min later".
+export const SCC_FETCH_INTERVAL_MS = 30 * 60e3;
+export const SCC_FETCH_SLACK_MS = 2 * 60e3;
 
 const MONTHS = { JAN: 1, FEB: 2, MAR: 3, APR: 4, MAY: 5, JUN: 6, JUL: 7, AUG: 8, SEP: 9, OCT: 10, NOV: 11, DEC: 12 };
 
