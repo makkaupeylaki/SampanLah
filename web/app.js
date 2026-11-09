@@ -367,6 +367,8 @@ const tracker = {
   ctx: null,
   data: null,
   cat: store.get("mcat", "all"),
+  showSeamarks: store.get("seamarks", true) !== false, // OpenSeaMap overlay, default on
+  seamarks: null,
   selected: null, // ship key
   drawn: [], // [{ s, x, y }] from the last draw, for hit-testing
   fetchedAt: 0,
@@ -393,7 +395,52 @@ function bindTracker() {
     renderMapChips(); draw();
   }));
   $(".card-close").addEventListener("click", () => select(null));
+  $("#seamarks-toggle").addEventListener("click", () => setSeamarks(!tracker.showSeamarks));
+  setSeamarks(tracker.showSeamarks);
   renderMapChips();
+}
+
+// ---------------------------------------------------------------- sea marks (OpenSeaMap)
+
+const SEAMARK_URL = "https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png";
+const SEAMARK_FALLBACK_HOST = "t1.openseamap.org";
+
+/**
+ * Seamark tiles that quietly retry each tile once on the t1 host, then just stay hidden:
+ * a failed or blocked OpenSeaMap never shows an error or a broken image, and the map works as before.
+ */
+const SeamarkLayer = window.L
+  ? L.TileLayer.extend({
+    createTile(coords, done) {
+      const img = document.createElement("img");
+      img.alt = "";
+      img.setAttribute("role", "presentation");
+      const url = this.getTileUrl(coords);
+      let retried = false;
+      img.onload = () => done(null, img);
+      img.onerror = () => {
+        if (!retried) {
+          retried = true;
+          img.src = url.replace("//tiles.openseamap.org/", `//${SEAMARK_FALLBACK_HOST}/`);
+          return;
+        }
+        img.classList.add("seamark-failed");
+        done(null, img); // treat as loaded-but-empty: no tileerror, no retries
+      };
+      img.src = url;
+      return img;
+    },
+  })
+  : null;
+
+function setSeamarks(on) {
+  tracker.showSeamarks = on;
+  store.set("seamarks", on);
+  $("#seamarks-toggle").setAttribute("aria-pressed", String(on));
+  const layer = tracker.seamarks;
+  if (!tracker.map || !layer) return;
+  if (on && !tracker.map.hasLayer(layer)) layer.addTo(tracker.map);
+  if (!on && tracker.map.hasLayer(layer)) tracker.map.removeLayer(layer);
 }
 
 function renderMapChips() {
@@ -413,8 +460,12 @@ function initMap() {
   L.control.zoom({ position: "bottomright" }).addTo(map);
   L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 18,
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · Positions: MPA via OCEANS-X',
+    attribution: 'Map data &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, <a href="https://www.openseamap.org">OpenSeaMap</a> · Positions: MPA via OCEANS-X',
   }).addTo(map);
+  // OpenSeaMap seamarks: above the base map (own pane, z 250 > tiles 200), below the ship canvas (z 450).
+  map.createPane("seamarks").style.zIndex = 250;
+  tracker.seamarks = new SeamarkLayer(SEAMARK_URL, { pane: "seamarks", maxZoom: 18, opacity: 0.95 });
+  if (tracker.showSeamarks) tracker.seamarks.addTo(map);
   const canvas = document.createElement("canvas");
   canvas.className = "ship-canvas";
   map.getContainer().appendChild(canvas);

@@ -261,6 +261,27 @@ body.tracker-on main { max-width: none; }
 }
 .map-note .stale { color: var(--warn); }
 
+/* Sea marks toggle + "Not for navigation", under the Updated line. */
+.map-tools { display: flex; align-items: center; gap: 8px; }
+.map-toggle {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 10px; border-radius: 999px; font-size: 12px;
+  border: 1px solid var(--line); background: rgba(11, 12, 14, 0.86); color: var(--muted);
+}
+.map-toggle::before {
+  content: ""; width: 8px; height: 8px; border-radius: 50%;
+  border: 1.5px solid currentColor; box-sizing: border-box;
+}
+.map-toggle[aria-pressed="true"] { color: var(--text); border-color: var(--faint); }
+.map-toggle[aria-pressed="true"]::before { background: var(--accent); border-color: var(--accent); }
+.map-nav-note {
+  padding: 2px 8px; border-radius: 999px; background: rgba(11, 12, 14, 0.7);
+  color: var(--faint); font-size: 11px; letter-spacing: 0.02em;
+}
+/* OpenSeaMap tiles sit in their own pane, outside the darkening filter on the base tiles. */
+.leaflet-seamarks-pane { pointer-events: none; }
+.leaflet-seamarks-pane img.seamark-failed { visibility: hidden; }
+
 .card {
   position: absolute; left: 12px; right: 12px; bottom: calc(28px + env(safe-area-inset-bottom)); z-index: 900;
   max-width: 460px; margin: 0 auto;
