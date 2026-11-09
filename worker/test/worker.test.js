@@ -294,7 +294,8 @@ test("failed reference fetch: board still served, flagged, and not retried per r
   const calls = mockUpstream({ fail: new Set(["types", "locs", "snapshot"]) });
   const body = await boardReq(e);
   assert.equal(body.typesUnavailable, true);
-  assert.ok(body.arr.length > 0, "board still served");
+  // Served with fresh MPA data (row counts depend on today's date vs the fixed mock times).
+  assert.ok(body.updatedAt && body.sources.mpa.okAt && Array.isArray(body.arr), "board still served");
   assert.ok(body.arr.filter((r) => r.src === "mpa").every((r) => r.cat === "cargo"));
   const after = refCalls(calls);
   clearMemo();
@@ -385,4 +386,19 @@ test("/api/positions seeds KV on a fresh deploy", async () => {
   assert.equal(body.count, 2);
   assert.equal(body.stale, false);
   assert.ok(await e.BOARD_KV.get("positions"));
+});
+
+test("SCC blocked after working once: board follows MPA, not stale; SCC state stays in sources", async () => {
+  const e = env();
+  mockUpstream();
+  await refreshBoard(e, NOW); // SCC works at 18:00
+  mockUpstream({ fail: new Set(["scc"]) }); // then bot protection kicks in
+  const later = NOW + 50 * 60e3;
+  const snap = await refreshBoard(e, later);
+  const b = buildBoard(snap, null, null, later + 60e3);
+  assert.equal(b.updatedAt, later, "Updated time is MPA's, not SCC's last good time");
+  assert.equal(b.stale, false);
+  assert.equal(b.sources.scc.stale, true);
+  assert.equal(b.sources.scc.okAt, NOW);
+  assert.match(b.sources.scc.error, /bot protection/);
 });
