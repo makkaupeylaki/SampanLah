@@ -234,13 +234,15 @@ export function buildBoard(snap, ref, vessels, now = Date.now()) {
 
   const mpa = sourceState(feeds, CORE_FEEDS, now);
   const scc = sourceState(feeds, ["scc"], now);
-  // "Updated" = the oldest of the sources that are working at all, so it never overstates freshness.
-  const okTimes = [mpa.okAt, scc.okAt].filter(Boolean);
-  const updatedAt = okTimes.length ? Math.min(...okTimes) : null;
+  // "Updated" and `stale` follow MPA, the main source. The SCC ferry board is a secondary source behind
+  // bot protection that can block it for hours; its own state is in sources.scc and the page shows it
+  // as a ferry note, so a blocked SCC never makes fresh MPA data look stale. If MPA has never
+  // worked, fall back to SCC's time (and the board is stale).
+  const updatedAt = mpa.okAt || scc.okAt || null;
   return {
     updatedAt,
     checkedAt: (snap && snap.checkedAt) || null,
-    stale: !updatedAt || mpa.stale || (scc.okAt ? scc.stale : false),
+    stale: !mpa.okAt || mpa.stale,
     sources: { mpa, scc },
     arr: rows.arr,
     dep: rows.dep,

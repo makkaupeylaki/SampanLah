@@ -49,8 +49,10 @@ MPA says these feeds update about hourly (the positions snapshot every 3 min).
 
 - `GET /api/board`:
   `{ updatedAt, checkedAt, stale, source, typesUnavailable, sources: { mpa, scc }, arr: Ship[], dep: Ship[] }`.
-  `updatedAt` is when the oldest working source last succeeded; `stale` is true when a source is failing
-  or older than 15 min. Rows cover the past 12 h and next 24 h.
+  `updatedAt` and `stale` follow MPA, the main source: `stale` is true when an MPA feed is failing or older
+  than 15 min. The SCC ferry board's own state is in `sources.scc` (the page shows it as a ferry note), so
+  a blocked SCC doesn't make the board stale; its last good ferry rows stay listed. Rows cover the past
+  12 h and next 24 h.
 - `GET /api/positions`: `{ updatedAt, checkedAt, stale, error, count, types: { code: name }, ships: Pos[] }`,
   same staleness rules as the board. `Pos`: `n` name, `imo`, `fl` flag, `la`/`lo` degrees, `h` heading
   (course when the heading is unknown; absent if neither), `s` speed (kn), `tc` type code, `l` length (m),
