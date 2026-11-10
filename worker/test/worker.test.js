@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import worker, { refreshBoard, refreshReference, clearMemo, resetRefGuard, sccDue } from "../src/index.js";
 import { buildBoard, classify } from "../src/board.js";
-import { parseFerryPage, slotsFor, operatorName } from "../src/scc.js";
+import { parseFerryPage, slotsFor, operatorName, fetchFerries } from "../src/scc.js";
 import { normaliseMovements, normaliseSnapshot, normalisePositions, vesselKey } from "../src/mpa.js";
 import { refreshPositions } from "../src/index.js";
 import { parseTime, sgtStamp } from "../src/time.js";
@@ -11,6 +11,8 @@ import { makeKV, installCaches, makeCtx } from "./harness.js";
 
 installCaches();
 const SCC_HTML = readFileSync(new URL("./fixtures/scc-arrival.html", import.meta.url), "utf8");
+const SCC_EMPTY = readFileSync(new URL("./fixtures/scc-empty.html", import.meta.url), "utf8");
+const SCC_CHALLENGE = readFileSync(new URL("./fixtures/scc-challenge.html", import.meta.url), "utf8");
 const NOW = Date.parse("2026-11-08T10:00:00Z"); // 18:00 SGT
 const sgt = (hm, day = "2026-11-08") => `${day} ${hm}:00`;
 const vp = (vesselName, imoNumber, callSign = "", flag = "PA") => ({ vesselName, imoNumber, callSign, flag });
@@ -463,4 +465,79 @@ test("SCC requests keep the honest User-Agent", async () => {
   const ua = calls.filter((c) => c.url.startsWith("https://singaporecruise.com.sg/")).map((c) => c.headers["User-Agent"]);
   assert.ok(ua.length && ua.every((u) => /^harbourlah\/1\.0 \(\+https:\/\/harbourlah\.pages\.dev/.test(u)), ua[0]);
   assert.equal(sccDue(null, NOW), true);
+});
+
+// ---------------------------------------------------------------- SCC empty slots vs real challenges
+
+/** Mock only the SCC site: `page(params)` returns the HTML for a request. MPA calls get []. */
+function mockScc(page) {
+  const reqs = [];
+  globalThis.fetch = async (url) => {
+    const u = new URL(String(url));
+    if (u.host !== "singaporecruise.com.sg") return Response.json([]);
+    const q = Object.fromEntries(u.searchParams);
+    reqs.push(q);
+    return new Response(page(q));
+  };
+  return reqs;
+}
+// The fixture's rows are dated 8 Nov; serve them for the slot asked for by re-dating them.
+const sccRowsFor = (date) => SCC_HTML.replace(/Sun, 08 Nov 2026/g, new Date(`${date}T00:00:00Z`).toUTCString().slice(0, 16)).replace(/pageid=\d+/g, "pageid=999");
+const ymd = (d) => `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`;
+
+test("empty slot page ('no schedule have been found') is an empty list, not a block", () => {
+  assert.match(SCC_EMPTY, /_Incapsula_Resource/, "real SCC pages also load the Incapsula script");
+  const p = parseFerryPage(SCC_EMPTY, "arr");
+  assert.deepEqual(p.rows, []);
+  assert.equal(p.empty, true);
+  assert.equal(p.blocked, false);
+  assert.ok(!p.failed);
+  assert.equal(p.hasNext, false);
+});
+
+test("real challenge page (no SCC content) is reported as a bot challenge", () => {
+  const p = parseFerryPage(SCC_CHALLENGE, "arr");
+  assert.equal(p.blocked, true);
+  assert.equal(p.failed, true);
+  assert.equal(p.reason, "bot protection challenge");
+  // SCC content without the table or the empty text: a layout change, not a challenge.
+  const odd = parseFerryPage(SCC_EMPTY.replace(/Sorry, no schedule have been found\./, "Something else"), "arr");
+  assert.equal(odd.blocked, false);
+  assert.match(odd.reason, /layout/);
+});
+
+test("evening fetch crossing midnight: tonight's rows kept, tomorrow's empty overnight slot skipped", async () => {
+  const evening = Date.parse("2026-11-10T20:30:00+08:00");
+  const reqs = mockScc((q) => (q.time === "18:00hrs-23:59hrs" ? sccRowsFor(ymd(q.date)) : SCC_EMPTY));
+  const rows = await fetchFerries(evening);
+  // Both directions asked for tonight (10 Nov 18-24) and tomorrow 00-06 (11 Nov).
+  const asked = reqs.map((q) => `${q["ferry-status"]} ${q.date} ${q.time}`);
+  assert.deepEqual(asked, [
+    "arrival 20261110 18:00hrs-23:59hrs", "arrival 20261111 00:00hrs-05:59hrs",
+    "departure 20261110 18:00hrs-23:59hrs", "departure 20261111 00:00hrs-05:59hrs",
+  ]);
+  assert.equal(rows.filter((r) => r.dir === "arr").length, 4, "tonight's arrivals survive the empty overnight slot");
+  assert.equal(rows.filter((r) => r.dir === "dep").length, 4, "departures fetched after it too");
+  assert.ok(rows.every((r) => new Date(r.st + 8 * 3600e3).toISOString().startsWith("2026-11-10")));
+
+  // Through the Worker: no error, rows stored, ferry source fresh.
+  const e = env();
+  mockScc((q) => (q.time === "18:00hrs-23:59hrs" ? sccRowsFor(ymd(q.date)) : SCC_EMPTY));
+  const snap = await refreshBoard(e, evening);
+  assert.equal(snap.feeds.scc.error, null);
+  assert.equal(snap.feeds.scc.items.length, 8);
+  assert.equal(buildBoard(snap, null, null, evening).sources.scc.stale, false);
+});
+
+test("a real challenge mid-fetch fails the SCC feed (last good kept), stopping at the challenge", async () => {
+  const e = env();
+  const evening = Date.parse("2026-11-10T20:30:00+08:00");
+  mockScc((q) => (q.time === "18:00hrs-23:59hrs" ? sccRowsFor(ymd(q.date)) : SCC_EMPTY));
+  await refreshBoard(e, evening);
+  const reqs = mockScc(() => SCC_CHALLENGE);
+  const snap = await refreshBoard(e, evening + 30 * 60e3);
+  assert.equal(reqs.length, 1, "one request, then stop");
+  assert.match(snap.feeds.scc.error, /bot protection challenge/);
+  assert.equal(snap.feeds.scc.items.length, 8, "last good ferry rows kept");
+  assert.equal(snap.feeds.scc.okAt, evening);
 });

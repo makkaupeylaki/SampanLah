@@ -70,13 +70,33 @@ export const operatorName = (s) =>
   titleCase(String(s || "").replace(/\b(PTE\.?|LTD\.?|SDN\.?|BHD\.?|PT\.?|CO\.?)\b/gi, "").replace(/[.,]/g, "").trim());
 
 /**
- * Parse one page. Returns { rows, hasNext, blocked }.
+ * Parse one page. Returns { rows, hasNext, blocked, empty?, failed?, reason? }.
  * rows: { dir, trip, op, from, to, st, at, et, status }
  */
+// An empty slot (e.g. 00:00-05:59) is a normal 200 page with this text instead of the table.
+const NO_SCHEDULE = /no schedules? ha(?:ve|s) been found/i;
+// Normal SCC site content. Every real SCC page also loads an Incapsula script, so an Incapsula
+// mention alone is NOT a challenge; only a page without SCC content that mentions Incapsula is.
+const SCC_SITE = /id="JsFerryFrom"|<title>[^<]*Singapore Cruise Centre/i;
+const CHALLENGE = /incapsula|Request unsuccessful/i;
+
+/**
+ * Classify a page that has no schedule table.
+ * Returns { empty: true } for an empty slot, else { error, blocked } where `blocked` means a real
+ * bot challenge (no SCC site content + Incapsula evidence).
+ */
+export function classifyNonTablePage(html) {
+  if (NO_SCHEDULE.test(html)) return { empty: true };
+  const site = SCC_SITE.test(html);
+  if (!site && CHALLENGE.test(html)) return { blocked: true, error: "bot protection challenge" };
+  return { blocked: false, error: site ? "schedule table missing (page layout may have changed)" : "unexpected page" };
+}
+
 export function parseFerryPage(html, dir) {
   if (!/class="schedule-table"/.test(html)) {
-    const blocked = /incapsula|_Incapsula_Resource|Request unsuccessful/i.test(html);
-    return { rows: [], hasNext: false, blocked: true, reason: blocked ? "bot protection challenge" : "schedule table missing" };
+    const c = classifyNonTablePage(html);
+    if (c.empty) return { rows: [], hasNext: false, blocked: false, empty: true };
+    return { rows: [], hasNext: false, blocked: c.blocked, failed: true, reason: c.error };
   }
   const start = html.indexOf('class="schedule-table"');
   const end = html.indexOf("</table>", start);
@@ -149,7 +169,8 @@ export async function fetchFerries(now) {
         if (page > 1) params.pageid = String(page);
         const html = await getPage(params);
         const parsed = parseFerryPage(html, dir === "arrival" ? "arr" : "dep");
-        if (parsed.blocked) throw new Error(`SCC ferry board unavailable (${parsed.reason})`);
+        // An empty slot just has no rows; carry on with the other slots and directions.
+        if (parsed.failed) throw new Error(`SCC ferry board unavailable (${parsed.reason})`);
         rows.push(...parsed.rows);
         if (!parsed.hasNext) break;
       }
