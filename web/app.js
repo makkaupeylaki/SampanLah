@@ -32,6 +32,14 @@ const fmtDay = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Singapore", we
 const fmtYmd = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Singapore", year: "numeric", month: "2-digit", day: "2-digit" });
 const hm = (ms) => (ms ? fmtTime.format(new Date(ms)) : "");
 const sameDay = (a, b) => fmtYmd.format(new Date(a)) === fmtYmd.format(new Date(b));
+const fmtDate = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Singapore", weekday: "short", day: "numeric", month: "short" });
+/** "17:30" today, "yesterday 17:30", else "Sun 8 Nov 17:30" (all SGT). */
+function whenSGT(ms, now = Date.now()) {
+  if (!ms) return "";
+  if (sameDay(ms, now)) return hm(ms);
+  if (sameDay(ms, now - 86400e3)) return `yesterday ${hm(ms)}`;
+  return `${fmtDate.format(new Date(ms))} ${hm(ms)}`;
+}
 
 let regionNames = null;
 try { regionNames = new Intl.DisplayNames(["en"], { type: "region" }); } catch { /* old browser */ }
@@ -215,7 +223,7 @@ function renderNote() {
   const scc = state.data && state.data.sources && state.data.sources.scc;
   if (scc && scc.error && (state.cat === "all" || state.cat === "ferry")) {
     lines.push(scc.okAt
-      ? `Ferry terminal board not updating (last good ${hm(scc.okAt)} SGT).`
+      ? `Ferry terminal board not updating (last good ${whenSGT(scc.okAt)} SGT).`
       : "Ferry terminal board unavailable right now; ferries shown come from MPA declarations only.");
   }
   el.hidden = !lines.length;
