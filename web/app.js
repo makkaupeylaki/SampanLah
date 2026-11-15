@@ -63,8 +63,8 @@ const isFinished = (s) => Boolean(s.at) || /arrived|departed|cancel/i.test(s.sta
 function statusClass(s) {
   const t = (s.status || "").toLowerCase();
   if (/cancel|delay/.test(t)) return "bad";
+  if (/^due\b/.test(t)) return "due";
   if (/arrived|departed/.test(t)) return "done";
-  if (/due|board|gate|berthing/.test(t)) return "warn";
   return "ok";
 }
 
@@ -91,6 +91,7 @@ function delayTagHTML(s) {
 }
 
 const CAT_LABEL = { ferry: "Ferry", cruise: "Cruise", cargo: "Cargo/Other" };
+const CHIP_LABEL = { all: "All", ferry: "Ferry", cruise: "Cruise", cargo: "Cargo" };
 
 /** "to Pasir Panjang Terminal" / "from Batam Centre" */
 function placeText(s) {
@@ -105,24 +106,29 @@ function placeText(s) {
 function timeHTML(s) {
   const t = shownTime(s);
   const changed = Boolean(s.st && t !== s.st && Math.abs(t - s.st) >= 60e3);
-  const title = [s.st && `Scheduled ${hm(s.st)}`, s.et && `Estimated ${hm(s.et)}`, s.at && `Actual ${hm(s.at)}`].filter(Boolean).join(", ");
-  const day = sameDay(t, Date.now()) ? "" : `<small>${esc(fmtDay.format(new Date(t)))}</small>`;
-  return `<span class="s-time${changed ? " changed" : ""}" title="${esc(title)}">${esc(hm(t))}${day}</span>`;
+  const day = sameDay(t, Date.now()) ? "" : fmtDay.format(new Date(t));
+  const title = [s.st && `Scheduled ${hm(s.st)}`, s.et && `Estimated ${hm(s.et)}`, s.at && `Actual ${hm(s.at)}`, day].filter(Boolean).join(", ");
+  return `<span class="s-time${changed ? " changed" : ""}" title="${esc(title)}">${esc(hm(t))}${day ? `<small>${esc(day)}</small>` : ""}</span>`;
 }
 
+/** FIDS row. Desktop: TIME | FLAG | SHIP | TYPE | FROM / TO | REMARKS. Phones: two lines (see style.css). */
 function rowHTML(s) {
   const open = state.open.has(s.id);
   const type = s.type || CAT_LABEL[s.cat];
-  const sub = [`<span class="s-type cat-${esc(s.cat)}">${esc(type)}</span>`, esc(placeText(s))].filter(Boolean).join(" · ");
+  const flag = s.fl ? `<span class="s-flag" title="${esc(countryName(s.fl) || s.fl)}">${esc(s.fl)}</span>` : `<span class="s-flag"></span>`;
   return `<div class="ship${open ? " open" : ""}" data-id="${esc(s.id)}">
     <div class="s-row" role="button" tabindex="0" aria-expanded="${open}">
       ${timeHTML(s)}
-      <span class="s-main"><span class="s-name">${esc(s.name)}</span><span class="s-sub">${sub}</span></span>
+      ${flag}
+      <span class="s-name">${esc(s.name)}</span>
+      <span class="s-sub"><span class="s-type cat-${esc(s.cat)}"><span class="s-type-text">${esc(type)}</span></span><span class="s-berth">${esc(placeText(s))}</span></span>
       <span class="s-status"><span class="pill ${statusClass(s)}">${esc(s.status)}</span>${delayTagHTML(s)}</span>
     </div>
     ${open ? detailHTML(s) : ""}
   </div>`;
 }
+
+const COL_LABELS = `<div class="col-labels" aria-hidden="true"><span>Time</span><span>Flag</span><span>Ship</span><span>Type</span><span>From / to</span><span class="l-rem">Remarks</span></div>`;
 
 const kv = (k, v, cls = "") => (v ? `<div class="kv${cls ? " " + cls : ""}"><dt>${esc(k)}</dt><dd>${v}</dd></div>` : "");
 const timeWithDay = (ms) => (ms ? `${esc(hm(ms))}${sameDay(ms, Date.now()) ? "" : ` <small>${esc(fmtDay.format(new Date(ms)))}</small>`}` : "");
@@ -204,13 +210,15 @@ function renderUpdated() {
   const el = $("#updated");
   const d = state.data;
   if (!d) { el.textContent = ""; return; }
-  if (!d.updatedAt) { el.innerHTML = `<span class="stale">No data yet</span>`; return; }
+  if (!d.updatedAt) { el.innerHTML = `<span class="stale">No data yet</span>`; el.parentElement.classList.add("is-stale"); return; }
   const old = Date.now() - d.updatedAt > OLD_DATA_MS;
   const errors = Object.entries(d.sources || {}).filter(([, v]) => v && v.error && v.okAt).map(([k, v]) => `${k}: ${v.error}`);
-  const tail = state.error || d.stale || old
+  const stale = Boolean(state.error || d.stale || old);
+  const tail = stale
     ? `<span class="stale" title="${esc([state.error, ...errors].filter(Boolean).join("\n"))}">${old ? `${Math.round((Date.now() - d.updatedAt) / 60e3)} min old, may be stale` : "may be stale"}</span>`
-    : `auto-refreshes every ${AUTO_REFRESH_MS / 60e3} min`;
+    : `auto ${AUTO_REFRESH_MS / 60e3} min`;
   el.innerHTML = `Updated ${esc(hm(d.updatedAt))} SGT · ${tail}`;
+  el.parentElement.classList.toggle("is-stale", stale);
 }
 
 function renderNote() {
@@ -234,8 +242,8 @@ function renderChips() {
   for (const b of $$("[data-cat]")) {
     const c = b.dataset.cat;
     const n = state.data ? listFor(state.dir, { cat: c, q: "" }).length : 0;
-    const label = { all: "All", ferry: "Ferries", cruise: "Cruise", cargo: "Cargo/Other" }[c];
-    b.innerHTML = `${label}${state.data ? `<span class="chip-count">${n}</span>` : ""}`;
+    const label = CHIP_LABEL[c];
+    b.innerHTML = `${label}${state.data ? ` <span class="chip-count">${n}</span>` : ""}`;
     b.setAttribute("aria-pressed", String(c === state.cat));
   }
 }
@@ -243,7 +251,6 @@ function renderChips() {
 function renderBoard() {
   const box = $("#board");
   box.setAttribute("aria-busy", String(state.loading));
-  box.setAttribute("aria-labelledby", `tab-${state.dir}`);
   renderUpdated();
   renderNote();
   renderChips();
@@ -264,7 +271,7 @@ function renderBoard() {
   const less = state.showEarlier && !state.q ? `<button class="more" type="button" data-act="later">Hide earlier ships</button>` : "";
   const word = state.dir === "arr" ? "arrivals" : "departures";
   box.innerHTML = list.length
-    ? more + less + list.map(rowHTML).join("")
+    ? COL_LABELS + more + less + list.map(rowHTML).join("")
     : more + `<p class="empty">${state.q ? "No ships match your search." : `No ${state.cat === "all" ? "" : CAT_LABEL[state.cat].toLowerCase() + " "}${word} in the next 24 hours.`}</p>`;
 }
 
@@ -302,8 +309,8 @@ function toggleRow(id) {
 }
 
 function setDir(dir) {
-  state.dir = dir; store.set("dir", dir); state.open.clear(); state.showEarlier = false;
-  showView("board");
+  state.dir = dir === "dep" ? "dep" : "arr"; store.set("dir", state.dir); state.open.clear(); state.showEarlier = false;
+  for (const b of $$("[data-dir]")) b.setAttribute("aria-pressed", String(b.dataset.dir === state.dir));
   renderBoard();
 }
 
@@ -313,19 +320,15 @@ function showView(view) {
   $("#view-board").hidden = view !== "board";
   $("#view-tracker").hidden = view !== "tracker";
   document.body.classList.toggle("tracker-on", view === "tracker");
-  const sel = view === "tracker" ? "tracker" : state.dir;
-  for (const t of $$(".tab")) t.setAttribute("aria-selected", String(t.dataset.tab === sel));
-  $("#view-board").setAttribute("aria-labelledby", `tab-${state.dir}`);
+  for (const t of $$(".tab")) t.setAttribute("aria-selected", String(t.dataset.view === view));
   const hash = view === "tracker" ? "#tracker" : "";
   if (location.hash !== hash) history.replaceState(null, "", location.pathname + location.search + hash);
   if (view === "tracker") openTracker();
 }
 
 function bind() {
-  $$(".tab").forEach((t) => t.addEventListener("click", () => {
-    if (t.dataset.tab === "tracker") showView("tracker");
-    else setDir(t.dataset.tab);
-  }));
+  $$(".tab").forEach((t) => t.addEventListener("click", () => showView(t.dataset.view)));
+  $$("[data-dir]").forEach((b) => b.addEventListener("click", () => setDir(b.dataset.dir)));
   $$("[data-cat]").forEach((b) => b.addEventListener("click", () => {
     state.cat = b.dataset.cat; store.set("cat", state.cat); renderBoard();
   }));
@@ -354,8 +357,8 @@ function bind() {
   });
   $("#refresh").addEventListener("click", () => refreshNow({ manual: true }));
   bindTracker();
-  if (location.hash === "#tracker") showView("tracker");
-  else setDir(state.dir);
+  setDir(state.dir);
+  showView(location.hash === "#tracker" ? "tracker" : "board");
 }
 
 // ================================================================ tracker
@@ -375,6 +378,7 @@ const tracker = {
   ctx: null,
   data: null,
   cat: store.get("mcat", "all"),
+  group: null, // "In Singapore waters now" filter: moving | stopped | tankers | container | bulk
   showSeamarks: store.get("seamarks", true) !== false, // OpenSeaMap overlay, default on
   seamarks: null,
   selected: null, // ship key
@@ -391,18 +395,25 @@ function catColors() {
   if (tracker.colors) return tracker.colors;
   const css = getComputedStyle(document.documentElement);
   const v = (n, d) => (css.getPropertyValue(n) || "").trim() || d;
-  tracker.colors = { ferry: v("--ferry", "#4fd8c8"), cruise: v("--cruise", "#c4a2ff"), cargo: v("--cargo", "#6cb6ff"), accent: v("--accent", "#ffd23f") };
+  tracker.colors = {
+    ferry: v("--t4", "#79b392"), cruise: v("--t2", "#a693c9"), cargo: v("--t1", "#7ba7c7"),
+    accent: v("--amber", "#a3e61a"), outline: `rgba(${v("--overlay-rgb", "10, 16, 14")}, 0.85)`,
+  };
   return tracker.colors;
 }
+// Theme switched (theme.js): re-read the tokens and redraw the ships.
+window.addEventListener("themechange", () => { tracker.colors = null; draw(); });
 
 function bindTracker() {
   $$("[data-mcat]").forEach((b) => b.addEventListener("click", () => {
     tracker.cat = b.dataset.mcat; store.set("mcat", tracker.cat);
     const sel = selectedShip();
-    if (sel && tracker.cat !== "all" && sel.c !== tracker.cat) select(null);
-    renderMapChips(); draw();
+    if (sel && !visibleShips().includes(sel)) select(null);
+    renderMapChips(); renderMapNote(); draw();
   }));
   $(".card-close").addEventListener("click", () => select(null));
+  $$("[data-group]").forEach((b) => b.addEventListener("click", () => setGroup(b.dataset.group)));
+  renderWaters();
   $("#seamarks-toggle").addEventListener("click", () => setSeamarks(!tracker.showSeamarks));
   setSeamarks(tracker.showSeamarks);
   renderMapChips();
@@ -455,9 +466,9 @@ function renderMapChips() {
   const ships = (tracker.data && tracker.data.ships) || [];
   for (const b of $$("[data-mcat]")) {
     const c = b.dataset.mcat;
-    const label = { all: "All", ferry: "Ferries", cruise: "Cruise", cargo: "Cargo/Other" }[c];
+    const label = CHIP_LABEL[c];
     const n = c === "all" ? ships.length : ships.filter((s) => s.c === c).length;
-    b.innerHTML = `${label}${tracker.data ? `<span class="chip-count">${n}</span>` : ""}`;
+    b.innerHTML = `${label}${tracker.data ? ` <span class="chip-count">${n}</span>` : ""}`;
     b.setAttribute("aria-pressed", String(c === tracker.cat));
   }
 }
@@ -516,6 +527,7 @@ async function loadPositions() {
     }
     renderMapNote();
     renderMapChips();
+    renderWaters();
     draw();
     renderCard();
   })();
@@ -538,7 +550,63 @@ function renderMapNote() {
 
 function visibleShips() {
   const ships = (tracker.data && tracker.data.ships) || [];
-  return tracker.cat === "all" ? ships : ships.filter((s) => s.c === tracker.cat);
+  const group = tracker.group && WATERS_GROUPS[tracker.group];
+  const codes = group && group.codes ? groupCodes(tracker.group) : null;
+  return ships.filter((s) =>
+    (tracker.cat === "all" || s.c === tracker.cat) && (!group || group.test(s, codes)));
+}
+
+// ---------------------------------------------------------------- "In Singapore waters now"
+//
+// Counts from the positions feed already loaded (no extra requests). Tapping a count filters the
+// map to those ships (together with the ALL / FERRY / CRUISE / CARGO chips); tap again to clear.
+
+const STOPPED_KN = 0.5; // below this a ship counts as stopped (anchored or alongside)
+const WATERS_GROUPS = {
+  moving: { test: (s) => s.s !== undefined && s.s >= STOPPED_KN },
+  stopped: { test: (s) => s.s !== undefined && s.s < STOPPED_KN },
+  tankers: { codes: ["TA", "CH", "LP", "LN"], test: (s, codes) => codes.has(s.tc) },
+  container: { codes: ["CS", "CF", "CR"], test: (s, codes) => codes.has(s.tc) },
+  bulk: { codes: ["BC", "OB"], test: (s, codes) => codes.has(s.tc) },
+};
+
+/** A group's type codes that the live feed actually uses (codes missing from its `types` map are ignored). */
+function groupCodes(name) {
+  const types = (tracker.data && tracker.data.types) || {};
+  return new Set((WATERS_GROUPS[name].codes || []).filter((c) => Object.prototype.hasOwnProperty.call(types, c)));
+}
+
+function renderWaters() {
+  const d = tracker.data;
+  const ships = (d && d.ships) || [];
+  const have = Boolean(d && d.updatedAt);
+  const set = (id, n) => { $(`#${id}`).textContent = have ? num(n) || "0" : "—"; };
+  set("w-total", ships.length);
+  for (const name of Object.keys(WATERS_GROUPS)) {
+    const g = WATERS_GROUPS[name];
+    const codes = g.codes ? groupCodes(name) : null;
+    set(`w-${name}`, ships.filter((s) => g.test(s, codes)).length);
+  }
+  for (const b of $$("[data-group]")) {
+    b.setAttribute("aria-pressed", String(b.dataset.group === tracker.group));
+    b.disabled = !have;
+  }
+  const st = $("#waters-status");
+  if (!d) st.innerHTML = tracker.error ? `<span class="stale">Positions unavailable</span>` : "Loading…";
+  else if (!have) st.innerHTML = `<span class="stale">No positions yet</span>`;
+  else {
+    const age = Date.now() - d.updatedAt;
+    st.innerHTML = tracker.error || d.stale || age > OLD_DATA_MS
+      ? `<span class="stale">${esc(hm(d.updatedAt))} SGT · may be stale</span>`
+      : `${esc(hm(d.updatedAt))} SGT`;
+  }
+}
+
+function setGroup(name) {
+  tracker.group = tracker.group === name ? null : name;
+  const sel = selectedShip();
+  if (sel && !visibleShips().includes(sel)) select(null);
+  renderWaters(); renderMapNote(); draw();
 }
 
 function selectedShip() {
@@ -553,7 +621,7 @@ function shipRadius(s, zoom) {
   return base * (zoom >= 14 ? 1.4 : zoom >= 12 ? 1.15 : zoom <= 9 ? 0.75 : 1);
 }
 
-function drawShip(ctx, x, y, r, heading, fill, ring) {
+function drawShip(ctx, x, y, r, heading, fill, ring, outline) {
   ctx.save();
   ctx.translate(x, y);
   ctx.beginPath();
@@ -572,7 +640,7 @@ function drawShip(ctx, x, y, r, heading, fill, ring) {
   ctx.fillStyle = fill;
   ctx.fill();
   ctx.lineWidth = 1;
-  ctx.strokeStyle = "rgba(11,12,14,0.85)";
+  ctx.strokeStyle = outline;
   ctx.stroke();
   ctx.restore();
   if (ring) {
@@ -610,11 +678,11 @@ function draw() {
     const p = map.latLngToContainerPoint([s.la, s.lo]);
     const r = shipRadius(s, zoom);
     if (shipKey(s) === tracker.selected) { sel = { s, p, r }; continue; }
-    drawShip(ctx, p.x, p.y, r, s.h, colors[s.c] || colors.cargo, null);
+    drawShip(ctx, p.x, p.y, r, s.h, colors[s.c] || colors.cargo, null, colors.outline);
     drawn.push({ s, x: p.x, y: p.y });
   }
   if (sel) {
-    drawShip(ctx, sel.p.x, sel.p.y, sel.r * 1.25, sel.s.h, colors[sel.s.c] || colors.cargo, colors.accent);
+    drawShip(ctx, sel.p.x, sel.p.y, sel.r * 1.25, sel.s.h, colors[sel.s.c] || colors.cargo, colors.accent, colors.outline);
     drawn.push({ s: sel.s, x: sel.p.x, y: sel.p.y });
   }
   tracker.drawn = drawn;
@@ -651,16 +719,16 @@ function renderCard() {
   if (!s) {
     card.classList.remove("show");
     card.setAttribute("aria-hidden", "true");
-    $("#view-tracker").classList.remove("card-open");
+    $(".map-wrap").classList.remove("card-open");
     return;
   }
   const types = (tracker.data && tracker.data.types) || {};
   const type = (s.tc && types[s.tc]) || s.tc || CAT_LABEL[s.c];
   const flag = s.fl ? `${esc(countryName(s.fl) || s.fl)}${countryName(s.fl) ? ` <small>${esc(s.fl)}</small>` : ""}` : "—";
-  const speed = s.s === undefined ? "—" : s.s < 0.5 ? "Stationary" : `${s.s.toFixed(1)} kn`;
+  const speed = s.s === undefined ? "—" : s.s < STOPPED_KN ? "Stopped" : `${s.s.toFixed(1)} kn`;
   $("#card-body").innerHTML = `
     <p class="c-name">${esc(s.n)}</p>
-    <p class="c-type cat-${esc(s.c)}">${esc(type)}${type !== CAT_LABEL[s.c] ? ` <span class="s-sub">· ${esc(CAT_LABEL[s.c])}</span>` : ""}</p>
+    <p class="c-type cat-${esc(s.c)}">${esc(type)}${type !== CAT_LABEL[s.c] ? ` <span class="c-cat">· ${esc(CAT_LABEL[s.c])}</span>` : ""}</p>
     <dl class="c-stats">
       ${kv("Flag", flag)}
       ${kv("Speed", esc(speed))}
@@ -669,7 +737,7 @@ function renderCard() {
     </dl>`;
   card.classList.add("show");
   card.setAttribute("aria-hidden", "false");
-  $("#view-tracker").classList.add("card-open");
+  $(".map-wrap").classList.add("card-open");
 }
 
 let toastTimer;
@@ -693,8 +761,9 @@ async function trackShip(row) {
     toast(`${row.name} isn't in the live positions right now.`);
     return;
   }
-  if (tracker.cat !== "all" && s.c !== tracker.cat) {
-    tracker.cat = "all"; store.set("mcat", "all"); renderMapChips(); renderMapNote();
+  if (!visibleShips().includes(s)) {
+    tracker.cat = "all"; store.set("mcat", "all"); tracker.group = null;
+    renderMapChips(); renderMapNote(); renderWaters();
   }
   tracker.map.setView([s.la, s.lo], Math.max(tracker.map.getZoom(), TRACK_ZOOM));
   select(shipKey(s));
@@ -734,5 +803,25 @@ document.addEventListener("visibilitychange", () => {
   else if (Date.now() - lastRefresh > AUTO_REFRESH_MS) refreshNow();
 });
 
+// ---------------------------------------------------------------- header clock
+
+const fmtClockTime = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Singapore", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+const fmtClockDate = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Singapore", weekday: "short", day: "numeric", month: "short" });
+
+/** Header clock, Singapore time ("13:01" over "SAT 14 NOV · SGT"). Purely visual. */
+function startClock() {
+  const t = $("#clock-time"), d = $("#clock-date");
+  if (!t || !d) return;
+  const tick = () => {
+    const now = new Date();
+    t.textContent = fmtClockTime.format(now);
+    const p = Object.fromEntries(fmtClockDate.formatToParts(now).map((x) => [x.type, x.value]));
+    d.textContent = `${p.weekday} ${p.day} ${p.month} · SGT`.toUpperCase();
+  };
+  tick();
+  setInterval(tick, 1000);
+}
+
+try { startClock(); } catch { /* the clock never blocks the board */ }
 bind();
 loadBoard();
