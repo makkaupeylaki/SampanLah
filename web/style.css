@@ -186,16 +186,28 @@ main { flex: 1; display: flex; flex-direction: column; width: 100%; }
 .search::placeholder { color: var(--faint); text-transform: uppercase; letter-spacing: 0.12em; }
 .search:focus { border-color: var(--faint); }
 
-/* Type filter: plain text buttons, coloured square before each category, active = white with a
-   2px amber underline (flightlah's terminal filter). */
-.chips { display: flex; flex-wrap: wrap; gap: 2px 14px; }
-.chips button {
-  border: 0; border-radius: 0; background: transparent; padding: 5px 1px;
-  color: var(--faint); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase;
-  display: inline-flex; align-items: center; gap: 6px; box-shadow: inset 0 -2px 0 transparent;
+/* Filter boxes (board TYPE row, Tracker map chips, "In Singapore waters now" counts): each option is
+   its own square-edged box with a 1px token border. Inactive = panel background, dim text.
+   Active = accent border + faint accent tint, white text (keeps the coloured category squares
+   readable in both themes, which a solid accent fill would not). */
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chips button, .w-stat {
+  border: 1px solid var(--line); border-radius: 0; background: var(--panel); color: var(--dim);
+  box-shadow: none;
 }
-.chips button:hover { color: var(--white); }
-.chips button[aria-pressed="true"] { color: var(--white); box-shadow: inset 0 -2px 0 var(--amber); }
+.chips button {
+  flex: none; min-height: 32px; padding: 0 11px;
+  font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 7px;
+}
+/* Hover only where a pointer really hovers (a tap would otherwise leave it stuck on phones). */
+@media (hover: hover) {
+  .chips button:hover, button.w-stat:hover { color: var(--white); border-color: var(--faint); }
+}
+.chips button[aria-pressed="true"], button.w-stat[aria-pressed="true"] {
+  color: var(--white); border-color: var(--amber); background: rgba(var(--amber-rgb), 0.12);
+}
+.chips button[aria-pressed="true"] .chip-count { color: var(--amber); }
 .chips [data-cat="ferry"], .chips [data-mcat="ferry"] { --tc: var(--ferry); }
 .chips [data-cat="cruise"], .chips [data-mcat="cruise"] { --tc: var(--cruise); }
 .chips [data-cat="cargo"], .chips [data-mcat="cargo"] { --tc: var(--cargo); }
@@ -348,8 +360,14 @@ main { flex: 1; display: flex; flex-direction: column; width: 100%; }
   .row-segs .search { flex: 1 1 100%; order: 9; padding: 9px 12px; font-size: 16px; } /* 16px stops iOS zoom */
   .row-segs .search::placeholder { font-size: 12px; }
   .seg button { padding: 6px 9px; }
-  .ctl-type { flex-wrap: wrap; }
-  .chips { gap: 2px 12px; }
+  /* TYPE boxes: one row, about 40px tall; scrolls sideways (equal gaps) if it can't fit. */
+  .ctl-type { flex: 1 1 100%; min-width: 0; }
+  .ctl-type .chips { flex: 1 1 auto; min-width: 0; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .ctl-type .chips::-webkit-scrollbar { display: none; }
+  /* Narrower phones: the row runs to the screen edge instead of being cut off inside the margin. */
+  .ctl-type .chips { margin-right: -16px; padding-right: 16px; }
+  .map-chips { margin-right: -10px; padding-right: 10px; } /* .map-top sits 10px in from the map edge */
+  .chips button { min-height: 40px; padding: 0 8px; gap: 6px; letter-spacing: 0.05em; }
   .refresh-group { margin-left: auto; }
 
   .col-labels { display: none; }
@@ -395,14 +413,9 @@ main { flex: 1; display: flex; flex-direction: column; width: 100%; }
   display: flex; flex-direction: column; align-items: flex-start; gap: 6px; pointer-events: none;
 }
 .map-top > * { pointer-events: auto; }
-/* Map chips: the board's type filter on a backdrop strip; scrolls sideways if it can't fit. */
-.map-chips {
-  max-width: 100%; flex-wrap: nowrap; gap: 0 12px; overflow-x: auto; scrollbar-width: none;
-  padding: 2px 10px; border: 1px solid var(--line); background: rgba(var(--overlay-rgb), 0.88);
-  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
-}
+/* Map chips: the same filter boxes over the map; one row that scrolls sideways if it can't fit. */
+.map-chips { max-width: 100%; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
 .map-chips::-webkit-scrollbar { display: none; }
-.map-chips button { flex: none; }
 .map-note {
   margin: 0; padding: 4px 10px; border: 1px solid var(--line); background: rgba(var(--overlay-rgb), 0.88);
   color: var(--dim); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
@@ -455,23 +468,17 @@ main { flex: 1; display: flex; flex-direction: column; width: 100%; }
 .waters-title { margin: 0; color: var(--amber); font-size: 11px; font-weight: 600; letter-spacing: 0.24em; text-transform: uppercase; }
 .waters-status { color: var(--faint); font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; text-align: right; }
 .waters-status .stale { color: var(--amber); }
-.waters-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 0; margin-top: 8px; border: 1px solid var(--line-soft); }
+.waters-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; margin-top: 8px; }
 .w-stat {
   display: flex; flex-direction: column; align-items: flex-start; gap: 1px; min-width: 0;
-  padding: 7px 10px 8px; border: 0; border-left: 1px solid var(--line-soft); border-radius: 0;
-  background: transparent; text-align: left; box-shadow: inset 0 -2px 0 transparent;
+  padding: 7px 10px 8px; text-align: left;
 }
-.w-stat:first-child { border-left: 0; }
-button.w-stat:hover { background: var(--row-hover); }
-.w-stat[aria-pressed="true"] { background: var(--row-hover); box-shadow: inset 0 -2px 0 var(--amber); }
 .w-stat[aria-pressed="true"] .w-label { color: var(--white); }
 .w-num { color: var(--amber); font-size: 20px; font-weight: 600; line-height: 1.15; font-variant-numeric: tabular-nums; }
 .w-label { color: var(--faint); font-size: 9px; letter-spacing: 0.2em; text-transform: uppercase; white-space: nowrap; }
 .waters-hint { margin: 7px 0 0; color: var(--faint); font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; }
 @media (max-width: 640px) {
   .waters-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .w-stat:nth-child(3n + 1) { border-left: 0; }
-  .w-stat:nth-child(n + 4) { border-top: 1px solid var(--line-soft); }
   .w-stat { padding: 6px 9px 7px; }
   .w-num { font-size: 18px; }
 }
