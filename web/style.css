@@ -360,12 +360,17 @@ main { flex: 1; display: flex; flex-direction: column; width: 100%; }
   .row-segs .search { flex: 1 1 100%; order: 9; padding: 9px 12px; font-size: 16px; } /* 16px stops iOS zoom */
   .row-segs .search::placeholder { font-size: 12px; }
   .seg button { padding: 6px 9px; }
-  /* TYPE boxes: one row, about 40px tall; scrolls sideways (equal gaps) if it can't fit. */
+  /* TYPE boxes on phones: all four always visible on one row, no scrolling. The TYPE label is
+     dropped, the boxes share the full row width (each grows from its content size, so ALL stays
+     narrow and the longer labels get the room), with tighter padding and type. Fits three-digit
+     counts at 360px; the boxes stay about 40px tall. */
   .ctl-type { flex: 1 1 100%; min-width: 0; }
-  .ctl-type .chips { flex: 1 1 auto; min-width: 0; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
-  .ctl-type .chips::-webkit-scrollbar { display: none; }
-  /* Narrower phones: the row runs to the screen edge instead of being cut off inside the margin. */
-  .ctl-type .chips { margin-right: -16px; padding-right: 16px; }
+  .ctl-type .ctl-label { display: none; }
+  .ctl-type .chips { flex: 1 1 auto; min-width: 0; flex-wrap: nowrap; gap: 6px; }
+  .ctl-type .chips button {
+    flex: 1 1 auto; min-width: 0; justify-content: center;
+    padding: 0 5px; gap: 5px; font-size: 10px; letter-spacing: 0.02em;
+  }
   .map-chips { margin-right: -10px; padding-right: 10px; } /* .map-top sits 10px in from the map edge */
   .chips button { min-height: 40px; padding: 0 8px; gap: 6px; letter-spacing: 0.05em; }
   .refresh-group { margin-left: auto; }
