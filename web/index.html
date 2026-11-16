@@ -92,6 +92,18 @@
             <button id="refresh" class="refresh-btn" type="button" aria-label="Refresh ships" title="Refresh"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/><path d="M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
           </div>
         </div>
+        <div id="term-row" class="row row-term">
+          <div class="ctl ctl-term">
+            <span class="ctl-label" aria-hidden="true">Terminal</span>
+            <div class="chips chips-term" role="group" aria-label="Terminal">
+              <button type="button" data-term="all" aria-pressed="true">All</button>
+              <button type="button" data-term="harbourfront" aria-pressed="false">HarbourFront</button>
+              <button type="button" data-term="tanahmerah" aria-pressed="false">Tanah Merah</button>
+              <button type="button" data-term="marinabay" aria-pressed="false">Marina Bay</button>
+            </div>
+          </div>
+        </div>
+        <p id="term-note" class="term-note" hidden>Cargo ships and ships without a known berth only show under All.</p>
         <p id="note" class="note" hidden></p>
       </div>
 

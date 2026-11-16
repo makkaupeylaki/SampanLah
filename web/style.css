@@ -214,6 +214,16 @@ main { flex: 1; display: flex; flex-direction: column; width: 100%; }
 .chips button:not([data-cat="all"]):not([data-mcat="all"])::before { content: ""; width: 7px; height: 7px; background: var(--tc); }
 .chip-count { font-variant-numeric: tabular-nums; font-weight: 600; }
 
+/* TERMINAL row (Board): the same boxes as TYPE, with the label over the count; no colour square. */
+.chips-term button {
+  flex-direction: column; justify-content: center; gap: 1px;
+  min-height: 44px; padding: 3px 12px; line-height: 1.2;
+}
+.chips-term button::before { display: none; }
+.chips-term .t-label { white-space: nowrap; }
+.chips-term button.is-zero:not([aria-pressed="true"]), .chips-term button.is-zero:not([aria-pressed="true"]) .chip-count { color: var(--faint); }
+.term-note { margin: -4px 0 0; color: var(--faint); font-size: 10px; letter-spacing: 0.06em; line-height: 1.5; }
+
 /* Status line: pulsing green dot + "UPDATED 13:01 SGT · AUTO 2 MIN" + refresh. */
 .refresh-group { display: flex; align-items: center; gap: 8px; margin-left: auto; min-width: 0; }
 .updated { margin: 0; color: var(--faint); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; text-align: right; }
@@ -372,6 +382,17 @@ main { flex: 1; display: flex; flex-direction: column; width: 100%; }
     padding: 0 5px; gap: 5px; font-size: 10px; letter-spacing: 0.02em;
   }
   .map-chips { margin-right: -10px; padding-right: 10px; } /* .map-top sits 10px in from the map edge */
+  /* TERMINAL boxes on phones: one row, no scrolling. ALL is a fixed narrow box; the other three
+     share the rest equally (6px gaps), 9.5px labels. */
+  .ctl-term { flex: 1 1 100%; min-width: 0; }
+  .ctl-term .ctl-label { display: none; }
+  .chips-term { flex: 1 1 auto; min-width: 0; display: grid; grid-template-columns: 52px repeat(3, minmax(0, 1fr)); gap: 6px; }
+  /* Phones: TERMINAL sits directly under TYPE, so the UPDATED line (part of the TYPE row on
+     desktop) moves below it. Visual order only; nothing else changes. */
+  .row-chips { display: contents; }
+  .row-segs { order: 0; } .ctl-type { order: 1; } .row-term { order: 2; } .term-note { order: 3; }
+  .row-chips > .refresh-group { order: 4; } .controls > .note { order: 5; }
+  .chips.chips-term button { min-width: 0; min-height: 44px; padding: 3px 2px; font-size: 9.5px; letter-spacing: 0.02em; }
   .chips button { min-height: 40px; padding: 0 8px; gap: 6px; letter-spacing: 0.05em; }
   .refresh-group { margin-left: auto; }
 

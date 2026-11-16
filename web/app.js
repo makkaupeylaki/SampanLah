@@ -183,6 +183,7 @@ const state = {
   view: "board",
   dir: store.get("dir", "arr"),
   cat: store.get("cat", "all"),
+  term: store.get("term", "all"), // TERMINAL filter: all | harbourfront | tanahmerah | marinabay
   q: "",
   open: new Set(),
   showEarlier: false,
@@ -199,9 +200,38 @@ function matches(s, q) {
   return hay.includes(q) || (s.imo && s.imo.includes(compact)) || (s.cs && s.cs.toLowerCase() === compact);
 }
 
-function listFor(dir = state.dir, { cat = state.cat, q = state.q } = {}) {
+function listFor(dir = state.dir, { cat = state.cat, q = state.q, term = state.term } = {}) {
   const query = q.trim().toLowerCase();
-  return ((state.data && state.data[dir]) || []).filter((s) => (cat === "all" || s.cat === cat) && matches(s, query));
+  return ((state.data && state.data[dir]) || []).filter((s) =>
+    (cat === "all" || s.cat === cat) && (term === "all" || terminalOf(s) === term) && matches(s, query));
+}
+
+// ---------------------------------------------------------------- terminal filter
+//
+// Which passenger terminal a row belongs to, from data the Worker already returns. Never guessed:
+// anything not listed here (cargo berths, anchorages, pilot boarding grounds, "M01 Marina Berth 1",
+// which is a Marina South cargo berth, or no berth at all) is null and only shows under All.
+
+const TERMINALS = { all: "All", harbourfront: "HarbourFront", tanahmerah: "Tanah Merah", marinabay: "Marina Bay" };
+const TERMINAL_CODES = [
+  [/^(RFT[1-8]|CC01[EW]?|CC02)$/, "harbourfront"], // regional ferry terminal + HarbourFront Cruise Centre
+  [/^TMFT$/, "tanahmerah"], // Tanah Merah Ferry Terminal
+  [/^CM0[12]$/, "marinabay"], // Marina Bay Cruise Centre
+];
+
+/** "harbourfront" | "tanahmerah" | "marinabay" | null */
+function terminalOf(s) {
+  if (s.src === "scc") {
+    // SCC ferry rows: the Singapore end is "to" for arrivals and "from" for departures.
+    const place = String((s.dir === "arr" ? s.to : s.from) || "").trim().toLowerCase();
+    if (place === "harbourfront") return "harbourfront";
+    if (place === "tanah merah") return "tanahmerah";
+    return null;
+  }
+  const code = String(s.loc || "").trim().toUpperCase();
+  if (!code) return null;
+  for (const [re, t] of TERMINAL_CODES) if (re.test(code)) return t;
+  return null;
 }
 
 const isEarlier = (s) => isFinished(s) && shownTime(s) < Date.now() - EARLIER_GRACE_MIN * 60e3;
@@ -241,11 +271,30 @@ function renderNote() {
 function renderChips() {
   for (const b of $$("[data-cat]")) {
     const c = b.dataset.cat;
-    const n = state.data ? listFor(state.dir, { cat: c, q: "" }).length : 0;
+    const n = state.data ? listFor(state.dir, { cat: c, q: "", term: "all" }).length : 0; // TYPE counts ignore the terminal
     const label = CHIP_LABEL[c];
     b.innerHTML = `${label}${state.data ? ` <span class="chip-count">${n}</span>` : ""}`;
     b.setAttribute("aria-pressed", String(c === state.cat));
   }
+}
+
+/** TERMINAL row: hidden for Cargo; counts for the current direction and type, no search. */
+function renderTerminals() {
+  const row = $("#term-row");
+  row.hidden = state.cat === "cargo";
+  for (const b of $$("[data-term]")) {
+    const t = b.dataset.term;
+    const n = state.data ? listFor(state.dir, { cat: state.cat, q: "", term: t }).length : 0;
+    b.innerHTML = `<span class="t-label">${esc(TERMINALS[t])}</span>${state.data ? `<span class="chip-count">${n}</span>` : ""}`;
+    b.classList.toggle("is-zero", Boolean(state.data) && n === 0);
+    b.setAttribute("aria-pressed", String(t === state.term));
+  }
+  $("#term-note").hidden = row.hidden || state.term === "all";
+}
+
+function setTerm(t) {
+  state.term = Object.prototype.hasOwnProperty.call(TERMINALS, t) ? t : "all";
+  store.set("term", state.term);
 }
 
 function renderBoard() {
@@ -254,6 +303,7 @@ function renderBoard() {
   renderUpdated();
   renderNote();
   renderChips();
+  renderTerminals();
   if (!state.data) {
     box.innerHTML = state.loading
       ? `<p class="empty">Loading ships…</p>`
@@ -272,7 +322,9 @@ function renderBoard() {
   const word = state.dir === "arr" ? "arrivals" : "departures";
   box.innerHTML = list.length
     ? COL_LABELS + more + less + list.map(rowHTML).join("")
-    : more + `<p class="empty">${state.q ? "No ships match your search." : `No ${state.cat === "all" ? "" : CAT_LABEL[state.cat].toLowerCase() + " "}${word} in the next 24 hours.`}</p>`;
+    : more + `<p class="empty">${state.q ? "No ships match your search."
+      : state.term !== "all" ? `No ships at ${esc(TERMINALS[state.term])} right now.`
+      : `No ${state.cat === "all" ? "" : CAT_LABEL[state.cat].toLowerCase() + " "}${word} in the next 24 hours.`}</p>`;
 }
 
 async function loadBoard({ quiet = false, fresh = false } = {}) {
@@ -330,7 +382,12 @@ function bind() {
   $$(".tab").forEach((t) => t.addEventListener("click", () => showView(t.dataset.view)));
   $$("[data-dir]").forEach((b) => b.addEventListener("click", () => setDir(b.dataset.dir)));
   $$("[data-cat]").forEach((b) => b.addEventListener("click", () => {
-    state.cat = b.dataset.cat; store.set("cat", state.cat); renderBoard();
+    state.cat = b.dataset.cat; store.set("cat", state.cat);
+    if (state.cat === "cargo") setTerm("all"); // cargo never uses these terminals: the row hides and resets
+    renderBoard();
+  }));
+  $$("[data-term]").forEach((b) => b.addEventListener("click", () => {
+    setTerm(b.dataset.term); renderBoard();
   }));
   let timer;
   $("#search").addEventListener("input", (e) => {
@@ -357,6 +414,7 @@ function bind() {
   });
   $("#refresh").addEventListener("click", () => refreshNow({ manual: true }));
   bindTracker();
+  if (state.cat === "cargo" || !Object.prototype.hasOwnProperty.call(TERMINALS, state.term)) setTerm("all");
   setDir(state.dir);
   showView(location.hash === "#tracker" ? "tracker" : "board");
 }
